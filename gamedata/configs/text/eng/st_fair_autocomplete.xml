@@ -67,13 +67,6 @@
         <text>Cancel tasks without penalty if someone else killed your target</text>
     </string>
     
-    <string id="ui_mcm_fair_autocomplete_reset_cooldown_on_stolen">
-        <text>Reset Cooldown on Stolen</text>
-    </string>
-    <string id="ui_mcm_fair_autocomplete_reset_cooldown_on_stolen_desc">
-        <text>When a task is stolen, reset the task giver's cooldown so you can get a new task immediately</text>
-    </string>
-    
     <string id="ui_mcm_fair_autocomplete_check_interval">
         <text>Check Interval (seconds)</text>
     </string>
@@ -130,14 +123,14 @@
         <text>Fate Tasks</text>
     </string>
     <string id="ui_mcm_fair_autocomplete_fate_desc">
-        <text>"Lost Signal", "Investigate the Scouts' Location" and "Trace the Emergency Signal"</text>
+        <text>"Lost Signal", "Investigate the Scouts' Location", "Trace the Emergency Signal" and "Find the Missing Duty Soldier"</text>
     </string>
     
     <string id="ui_mcm_fair_autocomplete_scripted">
         <text>Scripted Tasks</text>
     </string>
     <string id="ui_mcm_fair_autocomplete_scripted_desc">
-        <text>"Recover Sidorovich's shipment", "Find the Missing Duty Soldier" and "Recover the detector prototype"</text>
+        <text>"Recover Sidorovich's shipment" and "Recover the detector prototype"</text>
     </string>
     
     <string id="ui_mcm_fair_autocomplete_retrieve">
@@ -226,10 +219,10 @@
     
     <!-- Rewards -->
     <string id="ui_mcm_fair_autocomplete_compensate_item_rewards">
-        <text>Compensate Item Rewards</text>
+        <text>Replace Items with Money</text>
     </string>
     <string id="ui_mcm_fair_autocomplete_compensate_item_rewards_desc">
-        <text>Replaces any received items with their money equivalent</text>
+        <text>When enabled, item rewards from autocompleted tasks will be removed from your inventory and replaced with their money value. When disabled, you receive the items normally.</text>
     </string>
     
     <string id="ui_mcm_fair_autocomplete_compensation_coefficient">

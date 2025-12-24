@@ -235,12 +235,26 @@ function record_kill(victim, killer, is_monster)
     
     local smart_terrain = get_object_smart_terrain(victim)
     
-    -- Get victim faction for defense task validation
+    -- Get victim faction for defense task validation (stalkers)
+    -- Get monster_type for mutant hunt validation (monsters)
     local victim_faction = nil
-    if not is_monster then
-        local se_obj = alife_object(victim_id)
-        if se_obj and se_obj.community then
-            victim_faction = se_obj:community()
+    local monster_type = nil
+    
+    local se_victim = alife_object(victim_id)
+    if se_victim then
+        if is_monster then
+            -- For monsters, get the squad's player_id (e.g., "monster_vegetarian", "monster_predatory_day")
+            if se_victim.group_id and se_victim.group_id ~= 65535 then
+                local squad = alife_object(se_victim.group_id)
+                if squad and squad.player_id then
+                    monster_type = squad.player_id
+                end
+            end
+        else
+            -- For stalkers, get community
+            if se_victim.community then
+                victim_faction = se_victim:community()
+            end
         end
     end
     
@@ -269,7 +283,6 @@ function record_kill(victim, killer, is_monster)
     end
     
     -- Get victim's level
-    local se_victim = alife_object(victim_id)
     if se_victim then
         local gg = game_graph()
         if gg and se_victim.m_game_vertex_id then
@@ -287,13 +300,14 @@ function record_kill(victim, killer, is_monster)
         is_companion_kill = is_comp,
         is_monster = is_monster or false,
         faction = victim_faction,
+        monster_type = monster_type,  -- Squad player_id for monsters (e.g., "monster_vegetarian")
         actor_distance = actor_distance,  -- Distance from actor when killed
         actor_level = actor_level,        -- Actor's level when killed
         victim_level = victim_level,      -- Victim's level when killed
     }
     
-    printf("[FA-KillTracker] Recorded kill: victim_id=%s, section=%s, smart=%s, faction=%s, by_player=%s, by_companion=%s, distance=%.1f, same_level=%s",
-        victim_id, victim:section(), smart_terrain or "unknown", victim_faction or "none", 
+    printf("[FA-KillTracker] Recorded kill: victim_id=%s, section=%s, monster_type=%s, smart=%s, faction=%s, by_player=%s, by_companion=%s, distance=%.1f, same_level=%s",
+        victim_id, victim:section(), monster_type or "none", smart_terrain or "unknown", victim_faction or "none", 
         tostring(is_player), tostring(is_comp),
         actor_distance or -1,
         tostring(actor_level == victim_level))
@@ -303,7 +317,7 @@ function record_kill(victim, killer, is_monster)
     
     -- Update mutant task data if relevant
     if is_monster then
-        update_mutant_task_kills(victim:section(), smart_terrain)
+        update_mutant_task_kills(victim:section(), smart_terrain, monster_type)
     end
 end
 
@@ -578,16 +592,28 @@ function register_mutant_task(task_id, smart_terrain_name, mutant_section)
         task_id, smart_terrain_name or "any", mutant_section or "any")
 end
 
-function update_mutant_task_kills(section, smart_terrain)
+function update_mutant_task_kills(section, smart_terrain, monster_type)
     for task_id, data in pairs(_mutant_task_data) do
-        local section_match = (not data.mutant_section) or (data.mutant_section == section)
+        -- Match on monster_type (squad player_id like "monster_vegetarian") OR exact section
+        local section_match = false
+        if not data.mutant_section then
+            -- No section requirement - any mutant counts
+            section_match = true
+        elseif monster_type and data.mutant_section == monster_type then
+            -- Match on monster type (e.g., "monster_vegetarian" == "monster_vegetarian")
+            section_match = true
+        elseif data.mutant_section == section then
+            -- Fallback: exact section match (e.g., "boar_strong" == "boar_strong")
+            section_match = true
+        end
+        
         local location_match = (not data.smart_terrain) or (data.smart_terrain == smart_terrain)
         
         if section_match and location_match then
             -- Defensive: ensure killed_count is a number
             data.killed_count = (tonumber(data.killed_count) or 0) + 1
-            dbg_printf("[FA-KillTracker] Mutant task %s: player killed %s at %s (total: %d)",
-                task_id, section, smart_terrain or "unknown", data.killed_count)
+            dbg_printf("[FA-KillTracker] Mutant task %s: player killed section=%s monster_type=%s at %s (total: %d)",
+                task_id, section, monster_type or "unknown", smart_terrain or "unknown", data.killed_count)
         end
     end
 end

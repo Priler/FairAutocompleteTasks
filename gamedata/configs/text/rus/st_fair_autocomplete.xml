@@ -67,13 +67,6 @@
         <text>Отменять задания без штрафа, если кто-то другой убил вашу цель</text>
     </string>
     
-    <string id="ui_mcm_fair_autocomplete_reset_cooldown_on_stolen">
-        <text>Сбрасывать кулдаун при краже</text>
-    </string>
-    <string id="ui_mcm_fair_autocomplete_reset_cooldown_on_stolen_desc">
-        <text>Когда задание украдено, сбросить кулдаун заказчика, чтобы можно было сразу взять новое задание</text>
-    </string>
-    
     <string id="ui_mcm_fair_autocomplete_check_interval">
         <text>Интервал проверки (секунды)</text>
     </string>
@@ -130,14 +123,14 @@
         <text>Задания "Судьба"</text>
     </string>
     <string id="ui_mcm_fair_autocomplete_fate_desc">
-        <text>"Потерянный сигнал", "Расследовать местонахождение разведчиков" и "Отследить аварийный сигнал"</text>
+        <text>"Потерянный сигнал", "Расследовать местонахождение разведчиков", "Отследить аварийный сигнал" и "Найти пропавшего долговца"</text>
     </string>
     
     <string id="ui_mcm_fair_autocomplete_scripted">
         <text>Скриптовые задания</text>
     </string>
     <string id="ui_mcm_fair_autocomplete_scripted_desc">
-        <text>"Найти груз Сидоровича", "Найти пропавшего долговца" и "Найти прототип детектора"</text>
+        <text>"Найти груз Сидоровича" и "Найти прототип детектора"</text>
     </string>
     
     <string id="ui_mcm_fair_autocomplete_retrieve">
@@ -226,10 +219,10 @@
     
     <!-- Rewards -->
     <string id="ui_mcm_fair_autocomplete_compensate_item_rewards">
-        <text>Компенсировать награды предметами</text>
+        <text>Заменять предметы деньгами</text>
     </string>
     <string id="ui_mcm_fair_autocomplete_compensate_item_rewards_desc">
-        <text>Заменяет полученные предметы их денежным эквивалентом</text>
+        <text>Если включено, предметы-награды из автозавершённых заданий будут удалены из инвентаря и заменены деньгами. Если отключено, вы получите предметы как обычно.</text>
     </string>
     
     <string id="ui_mcm_fair_autocomplete_compensation_coefficient">

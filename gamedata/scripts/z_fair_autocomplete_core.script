@@ -20,7 +20,6 @@ local function get_mcm_config(category, key)
         max_kill_distance = 0,
         require_same_level = true,
         cancel_if_stolen = true,
-        reset_cooldown_on_stolen = true,
         check_interval = 2.0,
         -- Task types
         assault = true,
@@ -48,7 +47,7 @@ local function get_mcm_config(category, key)
         show_target_info = true,
         show_stolen_message = true,
         -- Lists
-        whitelist = "none",
+        whitelist = "esc_2_12_stalker_fanat_task_3:0",
         blacklist = "esc_2_12_stalker_wolf_task_3",
         -- Debug
         debug = false,
@@ -86,9 +85,12 @@ local HARDCODED_BLACKLIST = {
 ------------------------------------------------------------
 
 local _mod_ready = false
-local _task_cache = {}
-local _task_cache_count = 0  -- Track cache size
+_task_cache = {}
+_task_cache_count = 0  -- Track cache size
 local _registered_tasks = {}
+local _recently_processed = {}  -- Tasks recently completed/cancelled (prevent duplicates)
+_task_compensation_prices = {}  -- Cache for item reward compensation (GLOBAL for task_callback)
+_tasks_being_autocompleted = {}  -- Track tasks currently being autocompleted by our mod
 
 -- Module cache (performance optimization)
 local _utils = nil
@@ -112,6 +114,14 @@ local function cleanup_task_cache()
     if _task_cache_count > 200 then
         _task_cache = {}
         _task_cache_count = 0
+    end
+    
+    -- Cleanup old recently_processed entries (older than 60 seconds)
+    local current_time = os.time()
+    for task_id, processed_time in pairs(_recently_processed) do
+        if current_time - processed_time > 60 then
+            _recently_processed[task_id] = nil
+        end
     end
 end
 
@@ -144,6 +154,13 @@ local TASK_FUNCTOR_MAP = {
     ["anomaly_scanner_task_target"] = { key = "scanner", type = "scanner" },
 }
 
+-- Specific task IDs that should be treated as a certain type (overrides functor detection)
+-- Format: [task_id] = { key = "mcm_key", type = "task_type" }
+local TASK_ID_OVERRIDES = {
+    -- Duty "Find missing Dutyer" task - treat as fate task
+    ["bar_dolg_general_petrenko_stalker_task_rioc_pol"] = { key = "fate", type = "fate" },
+}
+
 -- Tasks that start with these prefixes are mutant hunts even if using assault functor
 local MUTANT_HUNT_TASK_PREFIXES = {
     "hunter_",
@@ -160,13 +177,24 @@ local KILL_VALIDATION_TYPES = {
 -- Helper Functions
 ------------------------------------------------------------
 
-local function is_task_type_enabled(target_functor)
+local function is_task_type_enabled(target_functor, task_id)
+    -- Check task ID overrides first
+    if task_id and TASK_ID_OVERRIDES[task_id] then
+        local override = TASK_ID_OVERRIDES[task_id]
+        return get_mcm_config(nil, override.key)
+    end
+    
     local info = TASK_FUNCTOR_MAP[target_functor]
     if not info then return false end
     return get_mcm_config(nil, info.key)
 end
 
 local function get_task_type(target_functor, task_id)
+    -- Check task ID overrides first
+    if task_id and TASK_ID_OVERRIDES[task_id] then
+        return TASK_ID_OVERRIDES[task_id].type
+    end
+    
     -- Check if task_id matches mutant hunt prefixes
     if task_id then
         for _, prefix in ipairs(MUTANT_HUNT_TASK_PREFIXES) do
@@ -283,6 +311,111 @@ local function show_completion_message(task_id, task_giver_id)
 end
 
 ------------------------------------------------------------
+-- Item Compensation (calculate money value of item rewards)
+------------------------------------------------------------
+
+-- Calculate task compensation (cloned from original Autocomplete Tasks mod)
+-- GLOBAL function for access from task_callback hook
+function calculate_task_compensation(reward_table)
+    if not reward_table then return nil end
+    
+    local min_reward, max_reward = 0, 0
+    local cleaned_rewards = {}
+    
+    local utils = get_utils()
+    local sell_discount = 1
+    if utils and utils.get_generic_sell_discount then
+        local success, result = pcall(utils.get_generic_sell_discount)
+        if success and result then
+            sell_discount = result
+        end
+    end
+    
+    local coefficient = get_mcm_config(nil, "compensation_coefficient") or 0.4
+    
+    for _, attrs in pairs(reward_table) do
+        if not attrs or not attrs[1] then goto continue end
+        
+        local attr_name, attr_args = attrs[1], attrs[3]
+        
+        if attr_name == "reward_money" then
+            local money = tonumber(attr_args[1]) or 0
+            min_reward = min_reward + money
+            max_reward = max_reward + money
+            
+        elseif attr_name == "reward_random_money" then
+            local money_min = tonumber(attr_args[1]) or 0
+            local money_max = tonumber(attr_args[2]) or 0
+            min_reward = min_reward + money_min
+            max_reward = max_reward + money_max
+            
+        elseif attr_name == "reward_item" then
+            local cost = 0
+            if utils and utils.get_base_cost then
+                local success, result = pcall(utils.get_base_cost, attr_args[1])
+                if success and result then cost = result end
+            elseif ini_sys and ini_sys.r_float_ex then
+                cost = ini_sys:r_float_ex(attr_args[1], "cost") or 0
+            end
+            local price = cost * sell_discount * coefficient
+            min_reward = min_reward + price
+            max_reward = max_reward + price
+            
+        elseif attr_name == "reward_random_item" then
+            local low, high = math.huge, -math.huge
+            for _, item in pairs(attr_args) do
+                local cost = 0
+                if utils and utils.get_base_cost then
+                    local success, result = pcall(utils.get_base_cost, item)
+                    if success and result then cost = result end
+                elseif ini_sys and ini_sys.r_float_ex then
+                    cost = ini_sys:r_float_ex(item, "cost") or 0
+                end
+                local price = cost * sell_discount * coefficient
+                if price > high then high = price end
+                if price < low then low = price end
+            end
+            if low ~= math.huge then min_reward = min_reward + low end
+            if high ~= -math.huge then max_reward = max_reward + high end
+            
+        else
+            -- Keep other reward types (goodwill, stash, etc.)
+            table.insert(cleaned_rewards, attrs)
+        end
+        
+        ::continue::
+    end
+    
+    if min_reward > 0 or max_reward > 0 then
+        table.insert(cleaned_rewards, {
+            "reward_random_money", 3, { min_reward, max_reward }
+        })
+    end
+    
+    return { rewards = cleaned_rewards, min = min_reward, max = max_reward }
+end
+
+-- Cache compensation prices (called during task registration)
+local function cache_compensation_prices(task_id)
+    if _task_compensation_prices[task_id] then return end
+    
+    local tm = task_manager.get_task_manager()
+    if not tm then return end
+    
+    local tm_info = tm.task_info[task_id]
+    if not tm_info then return end
+    
+    if tm_info.on_complete and tm_info.on_complete[1] and tm_info.on_complete[1][3] then
+        _task_compensation_prices[task_id] = calculate_task_compensation(tm_info.on_complete[1][3])
+        if _task_compensation_prices[task_id] then
+            printf("[FA] Cached compensation for task %s: %d-%d RU", task_id, 
+                _task_compensation_prices[task_id].min or 0, 
+                _task_compensation_prices[task_id].max or 0)
+        end
+    end
+end
+
+------------------------------------------------------------
 -- Task Registration
 ------------------------------------------------------------
 
@@ -307,6 +440,9 @@ local function register_task(task_id)
     end
     
     if not tsk or not tsk.target_functor then return end
+    
+    -- Cache compensation prices for item rewards
+    cache_compensation_prices(task_id)
     
     local task_type = get_task_type(tsk.target_functor, task_id)
     local var = load_var(db.actor, task_id)
@@ -462,13 +598,113 @@ local function get_task_registered_time(reg)
     return reg.registered_time
 end
 
+-- Mapping of section prefixes to monster squad types
+-- Based on simulation_objects.script squad definitions
+-- Note: _day and _night are normalized during matching, so we use base types
+local SECTION_TO_MONSTER_TYPE = {
+    -- monster_vegetarian (herbivores/passive)
+    ["boar"] = "monster_vegetarian",
+    ["flesh"] = "monster_vegetarian",
+    ["tushkano"] = "monster_vegetarian",
+    ["rat"] = "monster_vegetarian",
+    
+    -- monster_predatory (predators - same monsters spawn day/night)
+    ["dog"] = "monster_predatory",
+    ["pseudodog"] = "monster_predatory",
+    ["psy_dog"] = "monster_predatory",
+    ["cat"] = "monster_predatory",
+    ["chimera"] = "monster_predatory",
+    ["lurker"] = "monster_predatory",
+    
+    -- monster_zombied (zombies/snorks - same monsters spawn day/night)
+    ["zombie"] = "monster_zombied",
+    ["snork"] = "monster_zombied",
+    ["fracture"] = "monster_zombied",
+    
+    -- monster_special (special creatures)
+    ["bloodsucker"] = "monster_special",
+    ["controller"] = "monster_special",
+    ["burer"] = "monster_special",
+    ["poltergeist"] = "monster_special",
+    ["pseudogiant"] = "monster_special",
+    ["karlik"] = "monster_special",
+    ["psysucker"] = "monster_special",
+}
+
+-- Infer monster type from section name (fallback when monster_type not recorded)
+local function infer_monster_type_from_section(section)
+    if not section then return nil end
+    
+    -- Check each prefix
+    for prefix, monster_type in pairs(SECTION_TO_MONSTER_TYPE) do
+        if string.find(section, prefix, 1, true) == 1 then
+            return monster_type
+        end
+    end
+    
+    return nil
+end
+
 -- Check if a killed creature section matches the required section for a task
 -- Handles partial matches like "dog" matching "dog_blind", "dog_strong", etc.
-local function section_matches(kill_section, required_section)
+local function section_matches(kill_section, required_section, monster_type)
     -- If we don't know what section is required, we can't validate - return false
     -- This prevents random monster kills from counting for unknown task types
     if not required_section then return false end
     if not kill_section then return false end
+    
+    -- Helper to strip _day/_night suffix from monster types for comparison
+    -- monster_predatory_day and monster_predatory_night are the same monsters
+    local function normalize_monster_type(mtype)
+        if not mtype then return nil end
+        local normalized = mtype:gsub("_day$", ""):gsub("_night$", "")
+        return normalized
+    end
+    
+    -- Check if required_section is a monster category (squad player_id like "monster_vegetarian")
+    -- If so, match against monster_type instead of section
+    if string.find(required_section, "monster_", 1, true) == 1 then
+        local required_normalized = normalize_monster_type(required_section)
+        
+        -- If we have monster_type from kill data, use it
+        if monster_type then
+            local kill_normalized = normalize_monster_type(monster_type)
+            
+            -- Exact match (after normalization)
+            if kill_normalized == required_normalized then
+                return true
+            end
+            -- Also check partial match for monster types
+            if string.find(kill_normalized, required_normalized, 1, true) == 1 then
+                return true
+            end
+            if string.find(required_normalized, kill_normalized, 1, true) == 1 then
+                return true
+            end
+            -- Monster category mismatch
+            return false
+        end
+        
+        -- Fallback: infer monster_type from section name (for old kill records without monster_type)
+        local inferred_type = infer_monster_type_from_section(kill_section)
+        if inferred_type then
+            local inferred_normalized = normalize_monster_type(inferred_type)
+            
+            if inferred_normalized == required_normalized then
+                return true
+            end
+            -- Partial match
+            if string.find(inferred_normalized, required_normalized, 1, true) == 1 then
+                return true
+            end
+            if string.find(required_normalized, inferred_normalized, 1, true) == 1 then
+                return true
+            end
+        end
+        
+        -- Could not determine monster type - don't match
+        return false
+    end
     
     -- Exact match
     if kill_section == required_section then return true end
@@ -518,68 +754,153 @@ end
 
 local function validate_assault_kill(task_id)
     local smart_name = nil
+    local smart_position = nil
+    local smart_id = nil
     
     local reg = _registered_tasks[task_id]
     if reg and reg.smart_terrain then
         smart_name = reg.smart_terrain
     end
     
-    if not smart_name then
-        local var = load_var(db.actor, task_id)
-        if var and var.smart_id then
-            local smart_obj = alife_object(var.smart_id)
-            if smart_obj then
+    -- Get smart_id from task var
+    local var = load_var(db.actor, task_id)
+    if var and var.smart_id then
+        smart_id = var.smart_id
+        local smart_obj = alife_object(var.smart_id)
+        if smart_obj then
+            if not smart_name then
                 smart_name = smart_obj:name()
+            end
+            -- Get position directly from server object
+            if smart_obj.position then
+                smart_position = smart_obj.position
+                printf("[FA] validate_assault: got position from alife_object")
             end
         end
     end
     
+    -- Fallback: Get smart position from SIMBOARD by name
+    if smart_name and not smart_position and SIMBOARD then
+        -- Try smarts_by_names first
+        if SIMBOARD.smarts_by_names and SIMBOARD.smarts_by_names[smart_name] then
+            local smart_data = SIMBOARD.smarts_by_names[smart_name]
+            if smart_data and smart_data.smrt and smart_data.smrt.position then
+                smart_position = smart_data.smrt.position
+                printf("[FA] validate_assault: got position from smarts_by_names")
+            end
+        end
+        
+        -- Try iterating smarts table
+        if not smart_position and SIMBOARD.smarts then
+            for id, smart_data in pairs(SIMBOARD.smarts) do
+                if smart_data.smrt and smart_data.smrt:name() == smart_name then
+                    if smart_data.smrt.position then
+                        smart_position = smart_data.smrt.position
+                        printf("[FA] validate_assault: got position from smarts iteration")
+                    end
+                    break
+                end
+            end
+        end
+    end
+    
+    -- Fallback: Get position by smart_id directly from SIMBOARD
+    if smart_id and not smart_position and SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart_id] then
+        local smart_data = SIMBOARD.smarts[smart_id]
+        if smart_data and smart_data.smrt and smart_data.smrt.position then
+            smart_position = smart_data.smrt.position
+            printf("[FA] validate_assault: got position from smarts by ID")
+        end
+    end
+    
     -- If we can't determine task location, don't autocomplete (let vanilla handle it)
-    if not smart_name then
+    if not smart_name and not smart_position then
         return false, "no_smart_terrain"
     end
+    
+    printf("[FA] validate_assault: task=" .. tostring(task_id) .. " smart_terrain=" .. tostring(smart_name) .. " smart_id=" .. tostring(smart_id) .. " has_position=" .. tostring(smart_position ~= nil))
     
     -- Get task registration time (only count kills AFTER task was taken)
     local task_registered_time = get_task_registered_time(reg)
     
     local tracker = get_kill_tracker()
     if tracker and tracker._player_kills then
-        local kills_at_location = 0
-        local total_npc_kills_at_location = 0
+        local player_kills_at_location = 0
+        local player_kills_nearby = 0
+        local total_kills_at_location = 0
         
         for victim_id, kill_data in pairs(tracker._player_kills) do
             -- Only count kills that happened AFTER task was registered
             local kill_time = get_time_as_number(kill_data.time)
             if kill_time >= task_registered_time then
-                if not kill_data.is_monster and kill_data.location == smart_name then
-                    total_npc_kills_at_location = total_npc_kills_at_location + 1
+                local location_match = false
+                local nearby_match = false
+                
+                -- Method 1: Exact smart terrain match
+                if smart_name and kill_data.location == smart_name then
+                    location_match = true
+                end
+                
+                -- Method 2: Position-based match (within 150m of task smart terrain)
+                if smart_position and kill_data.position then
+                    local kill_pos = kill_data.position
+                    if type(kill_pos) == "table" and kill_pos.x then
+                        local kill_vec = vector():set(kill_pos.x, kill_pos.y, kill_pos.z)
+                        local dist = smart_position:distance_to(kill_vec)
+                        if dist < 150 then
+                            nearby_match = true
+                            printf("[FA] validate_assault: kill within " .. string.format("%.1f", dist) .. "m of smart terrain")
+                        else
+                            printf("[FA] validate_assault: kill too far - " .. string.format("%.1f", dist) .. "m from smart terrain")
+                        end
+                    end
+                end
+                
+                if location_match or nearby_match then
+                    total_kills_at_location = total_kills_at_location + 1
                     if kill_data.is_player_kill or kill_data.is_companion_kill then
-                        kills_at_location = kills_at_location + 1
+                        if location_match then
+                            player_kills_at_location = player_kills_at_location + 1
+                        end
+                        if nearby_match then
+                            player_kills_nearby = player_kills_nearby + 1
+                        end
+                        printf("[FA] validate_assault: matched kill - section=" .. tostring(kill_data.section) .. " is_monster=" .. tostring(kill_data.is_monster) .. " location_match=" .. tostring(location_match) .. " nearby_match=" .. tostring(nearby_match))
                     end
                 end
             end
         end
         
+        -- Use the better count (location match OR nearby match)
+        local player_kills = math.max(player_kills_at_location, player_kills_nearby)
+        
+        printf("[FA] validate_assault: player_kills=" .. tostring(player_kills) .. " (at_location=" .. tostring(player_kills_at_location) .. " nearby=" .. tostring(player_kills_nearby) .. ") total=" .. tostring(total_kills_at_location) .. " at " .. tostring(smart_name))
+        
         -- Check against kill requirement setting
         -- 1 = at least one, 2 = at least half, 3 = all enemies
-        local kill_req = get_mcm_config(nil, "kill_requirement") or 1
+        local kill_req = tonumber(get_mcm_config(nil, "kill_requirement")) or 1
         
-        if kill_req == 1 then
-            -- At least one player kill
-            if kills_at_location > 0 then
+        printf("[FA] validate_assault: kill_req=" .. tostring(kill_req) .. " player_kills=" .. tostring(player_kills))
+        
+        if player_kills > 0 then
+            if kill_req == 1 then
+                -- At least one player kill
                 return true, "kills_at_location"
-            end
-        elseif kill_req == 2 then
-            -- At least half of recorded kills must be by player
-            if total_npc_kills_at_location > 0 and kills_at_location >= (total_npc_kills_at_location / 2) then
-                return true, "kills_at_location_half"
-            elseif total_npc_kills_at_location == 0 and kills_at_location > 0 then
+            elseif kill_req == 2 then
+                -- At least half of recorded kills must be by player
+                if total_kills_at_location > 0 and player_kills >= (total_kills_at_location / 2) then
+                    return true, "kills_at_location_half"
+                elseif total_kills_at_location == 0 then
+                    return true, "kills_at_location"
+                end
+            elseif kill_req == 3 then
+                -- All recorded kills must be by player (strict mode)
+                if total_kills_at_location > 0 and player_kills == total_kills_at_location then
+                    return true, "kills_at_location_all"
+                end
+            else
+                -- Unknown kill_req, default to at least one
                 return true, "kills_at_location"
-            end
-        elseif kill_req == 3 then
-            -- All recorded kills must be by player (strict mode)
-            if total_npc_kills_at_location > 0 and kills_at_location == total_npc_kills_at_location then
-                return true, "kills_at_location_all"
             end
         end
     end
@@ -827,9 +1148,9 @@ local function validate_mutant_hunt_kill(task_id)
             -- Check if section matches (if strict mode - we know required section)
             local section_ok = true
             if strict_section then
-                section_ok = section_matches(kill_data.section, required_section)
+                section_ok = section_matches(kill_data.section, required_section, kill_data.monster_type)
                 if not section_ok and get_mcm_config(nil, "debug") then
-                    printf("[FA] validate_mutant_hunt: skipping kill section=" .. tostring(kill_data.section) .. " (required=" .. tostring(required_section) .. ")")
+                    printf("[FA] validate_mutant_hunt: skipping kill section=" .. tostring(kill_data.section) .. " monster_type=" .. tostring(kill_data.monster_type) .. " (required=" .. tostring(required_section) .. ")")
                 end
             end
             
@@ -840,7 +1161,7 @@ local function validate_mutant_hunt_kill(task_id)
                     -- Exact location match
                     if smart_name and kill_data.location == smart_name then
                         kills_at_location = kills_at_location + 1
-                        printf("[FA] validate_mutant_hunt: matched kill at location, section=" .. tostring(kill_data.section))
+                        printf("[FA] validate_mutant_hunt: matched kill at location, section=" .. tostring(kill_data.section) .. " monster_type=" .. tostring(kill_data.monster_type))
                     end
                     -- Position-based match (within 150m of task smart terrain)
                     if smart_position and kill_data.position then
@@ -881,7 +1202,7 @@ local function validate_mutant_hunt_kill(task_id)
                 local kill_time = get_time_as_number(kill_data.time)
                 if kill_time >= task_registered_time then
                     -- Must also match section if we know what type of monster is required
-                    if section_matches(kill_data.section, required_section) then
+                    if section_matches(kill_data.section, required_section, kill_data.monster_type) then
                         matching_monster_kills = matching_monster_kills + 1
                     end
                 end
@@ -889,7 +1210,7 @@ local function validate_mutant_hunt_kill(task_id)
         end
         
         if matching_monster_kills > 0 then
-            printf("[FA] validate_mutant_hunt RESULT: matching_monster_kills=" .. tostring(matching_monster_kills) .. " (section=" .. tostring(required_section) .. ") -> PASS (fallback)")
+            printf("[FA] validate_mutant_hunt RESULT: matching_monster_kills=" .. tostring(matching_monster_kills) .. " (required=" .. tostring(required_section) .. ") -> PASS (fallback)")
             return true, "monster_kills_no_location"
         end
     end
@@ -906,12 +1227,33 @@ local function is_in_list(list_str, task_id)
     if not list_str or list_str == "" or list_str == "none" then return false end
     for item in string.gmatch(list_str, "[^,]+") do
         item = item:match("^%s*(.-)%s*$")  -- trim whitespace
-        if item == task_id then return true end
+        -- Check if entry has stage override (task_id:stage) - extract just the task_id
+        local item_task_id = item:match("^([^:]+)")
+        if item_task_id and item_task_id == task_id then return true end
     end
     return false
 end
 
+-- Get stage override from whitelist entry (returns nil if no override)
+-- Format: "task_id:stage" e.g. "esc_2_12_stalker_fanat_task_3:0"
+local function get_whitelist_stage_override(list_str, task_id)
+    if not list_str or list_str == "" or list_str == "none" then return nil end
+    for item in string.gmatch(list_str, "[^,]+") do
+        item = item:match("^%s*(.-)%s*$")  -- trim whitespace
+        local item_task_id, item_stage = item:match("^([^:]+):(%d+)$")
+        if item_task_id and item_task_id == task_id and item_stage then
+            return tonumber(item_stage)
+        end
+    end
+    return nil
+end
+
 local function should_autocomplete(task_id, task_info)
+    -- Skip tasks that were recently processed (prevents duplicate completions)
+    if _recently_processed[task_id] then
+        return false, "recently_processed"
+    end
+    
     local stage = task_info.stage
     if not stage then return false, "no_stage" end
     
@@ -935,17 +1277,16 @@ local function should_autocomplete(task_id, task_info)
         return false, "blacklisted"
     end
     
-    -- Check MCM whitelist (always autocomplete)
-    local whitelist = get_mcm_config(nil, "whitelist")
-    if is_in_list(whitelist, task_id) then
-        return true, "whitelisted"
-    end
-    
     -- Check MCM blacklist (never autocomplete)
     local blacklist = get_mcm_config(nil, "blacklist")
     if is_in_list(blacklist, task_id) then
         return false, "user_blacklisted"
     end
+    
+    -- Check if whitelisted (will bypass type check and kill validation, but NOT stage check)
+    local whitelist = get_mcm_config(nil, "whitelist")
+    local is_whitelisted = is_in_list(whitelist, task_id)
+    local whitelist_stage_override = get_whitelist_stage_override(whitelist, task_id)
     
     if not _task_cache[task_id] then
         local parsed = utils_data.parse_ini_section_to_array(task_manager.task_ini, task_id)
@@ -967,10 +1308,14 @@ local function should_autocomplete(task_id, task_info)
     end
     
     local target_functor = tsk.target_functor
-    if not target_functor then return false, "no_functor" end
     
-    if not is_task_type_enabled(target_functor) then
-        return false, "type_disabled"
+    -- Whitelisted tasks bypass type check, others require valid functor and enabled type
+    if not is_whitelisted then
+        if not target_functor then return false, "no_functor" end
+        
+        if not is_task_type_enabled(target_functor, task_id) then
+            return false, "type_disabled"
+        end
     end
     
     -- Reward stage detection via functor (more reliable than just stage number)
@@ -1003,8 +1348,19 @@ local function should_autocomplete(task_id, task_info)
         normalized_stage_complete = stage_complete - 1
     end
     
+    -- Whitelist stage override (e.g. "task_id:0" to complete at stage 0)
+    if is_whitelisted and whitelist_stage_override then
+        normalized_stage_complete = whitelist_stage_override
+        printf("[FA] Using whitelist stage override for %s: %d", task_id, whitelist_stage_override)
+    end
+    
     if current_stage ~= normalized_stage_complete then
         return false, string.format("stage_mismatch(%d!=%d)", current_stage, normalized_stage_complete)
+    end
+    
+    -- Whitelisted tasks bypass kill validation
+    if is_whitelisted then
+        return true, "whitelisted"
     end
     
     if get_mcm_config(nil, "require_player_kill") then
@@ -1037,86 +1393,6 @@ local function should_autocomplete(task_id, task_info)
     end
     
     return true, "passed"
-end
-
-------------------------------------------------------------
--- Item Reward Compensation
-------------------------------------------------------------
-
-local function compensate_item_rewards(task_id)
-    local tsk = _task_cache[task_id]
-    if not tsk then return end
-    
-    -- Parse on_complete effects to find item rewards
-    local on_complete = tsk.on_complete
-    if not on_complete then return end
-    
-    local coefficient = get_mcm_config(nil, "compensation_coefficient") or 0.4
-    local sell_discount = 1
-    
-    -- Try to get sell discount from utils (cached)
-    local utils = get_utils()
-    if utils and utils.get_generic_sell_discount then
-        local success, result = pcall(utils.get_generic_sell_discount)
-        if success and result then
-            sell_discount = result
-        end
-    end
-    
-    local total_compensation = 0
-    local items_found = {}
-    
-    -- Parse the on_complete string for reward_item and reward_random_item
-    -- Format: %=reward_item(item_section)% or %=reward_random_item(item1:item2:item3)%
-    for reward_type, reward_args in string.gmatch(on_complete, "%%=([%w_]+)%(([^%)]+)%)%%") do
-        if reward_type == "reward_item" then
-            local item_section = reward_args
-            local cost = 0
-            if utils and utils.get_base_cost then
-                local success, result = pcall(utils.get_base_cost, item_section)
-                if success and result then cost = result end
-            elseif ini_sys and ini_sys.r_float_ex then
-                cost = ini_sys:r_float_ex(item_section, "cost") or 0
-            end
-            local compensation = cost * sell_discount * coefficient
-            total_compensation = total_compensation + compensation
-            table.insert(items_found, item_section)
-            
-        elseif reward_type == "reward_random_item" then
-            -- Random item - calculate average value
-            local items = {}
-            for item in string.gmatch(reward_args, "[^:]+") do
-                table.insert(items, item)
-            end
-            if #items > 0 then
-                local avg_cost = 0
-                for _, item in ipairs(items) do
-                    local cost = 0
-                    if utils and utils.get_base_cost then
-                        local success, result = pcall(utils.get_base_cost, item)
-                        if success and result then cost = result end
-                    elseif ini_sys and ini_sys.r_float_ex then
-                        cost = ini_sys:r_float_ex(item, "cost") or 0
-                    end
-                    avg_cost = avg_cost + cost
-                end
-                avg_cost = avg_cost / #items
-                local compensation = avg_cost * sell_discount * coefficient
-                total_compensation = total_compensation + compensation
-                table.insert(items_found, "random_item")
-            end
-        end
-    end
-    
-    -- Add compensation money to player
-    if total_compensation > 0 and db.actor then
-        total_compensation = math.floor(total_compensation)
-        db.actor:give_money(total_compensation)
-        
-        if get_mcm_config(nil, "debug") then
-            printf("[FA] Item compensation for " .. tostring(task_id) .. ": " .. tostring(total_compensation) .. " RU (items: " .. table.concat(items_found, ", ") .. ")")
-        end
-    end
 end
 
 ------------------------------------------------------------
@@ -1224,7 +1500,6 @@ local function get_cycle_config()
             debug = get_mcm_config(nil, "debug"),
             require_player_kill = get_mcm_config(nil, "require_player_kill"),
             cancel_if_stolen = get_mcm_config(nil, "cancel_if_stolen"),
-            reset_cooldown_on_stolen = get_mcm_config(nil, "reset_cooldown_on_stolen"),
             compensate_item_rewards = get_mcm_config(nil, "compensate_item_rewards"),
             kill_requirement = get_mcm_config(nil, "kill_requirement") or 1,
         }
@@ -1234,6 +1509,9 @@ end
 
 local function do_autocompletion()
     if not _mod_ready then return end
+    
+    -- Periodic cleanup (prevent memory growth)
+    cleanup_task_cache()
     
     -- Cache MCM config for this cycle (performance)
     _cycle_config = nil  -- Reset cache
@@ -1303,12 +1581,14 @@ local function do_autocompletion()
     
     for _, task_data in ipairs(tasks_to_complete) do
         printf("[FA] AUTOCOMPLETING: %s", task_data.id)
+        
+        -- Mark as recently processed BEFORE completing (prevents duplicates)
+        _recently_processed[task_data.id] = os.time()
+        
+        -- Mark as being autocompleted (for item compensation in task_callback)
+        _tasks_being_autocompleted[task_data.id] = true
+        
         pcall(function()
-            -- Handle item compensation if enabled
-            if cfg.compensate_item_rewards then
-                compensate_item_rewards(task_data.id)
-            end
-            
             -- Post-completion cleanup for specific task types (spy, hostage)
             -- Must be done BEFORE completing the task
             post_completion_cleanup(task_data.id, task_data.target_functor)
@@ -1317,8 +1597,12 @@ local function do_autocompletion()
             show_completion_message(task_data.id, task_data.giver_id)
             
             -- Complete the task
+            -- Item compensation is handled by task_callback hook
             tm:set_task_completed(task_data.id)
         end)
+        
+        -- Note: _tasks_being_autocompleted flag is cleared in task_callback after compensation
+        
         unregister_task(task_data.id)
     end
     
@@ -1330,6 +1614,10 @@ local function do_autocompletion()
     if cfg.cancel_if_stolen then
         for _, task_data in ipairs(tasks_to_cancel) do
             printf("[FA] CANCELLING (stolen): " .. tostring(task_data.id) .. " - " .. tostring(task_data.reason))
+            
+            -- Mark as recently processed BEFORE cancelling (prevents duplicates)
+            _recently_processed[task_data.id] = os.time()
+            
             pcall(function()
                 -- Stop any ongoing dialog with task-related NPCs (CTD prevention)
                 local var = load_var(db.actor, task_data.id)
@@ -1343,19 +1631,9 @@ local function do_autocompletion()
                     end
                 end
                 
-                -- Clear on_fail to prevent reputation loss (Cancel != Fail)
-                local task_info = tm.task_info[task_data.id]
-                if task_info then
-                    task_info.on_fail = nil
-                end
+                -- Use set_task_cancelled - cancels without reputation loss
+                tm:set_task_cancelled(task_data.id)
                 
-                -- Reset task giver cooldown so player can get new task immediately
-                if cfg.reset_cooldown_on_stolen and task_data.giver_id and fair_autocomplete_utils and fair_autocomplete_utils.reset_task_giver_cooldown then
-                    fair_autocomplete_utils.reset_task_giver_cooldown(task_data.giver_id)
-                end
-                
-                -- Fail the task (without penalty since on_fail is cleared)
-                tm:set_task_failed(task_data.id)
                 show_stolen_message(task_data.id, task_data.giver_id)
             end)
             unregister_task(task_data.id)
@@ -1404,6 +1682,9 @@ function load_state(m_data)
     _task_cache = {}
     _task_cache_count = 0
     _registered_tasks = m_data.fa_registered_tasks or {}
+    _recently_processed = {}  -- Clear recently processed tasks on load
+    _task_compensation_prices = {}  -- Clear compensation cache on load
+    _tasks_being_autocompleted = {}  -- Clear autocomplete tracking on load
     -- Don't set _mod_ready = false! The mod is already initialized if we're loading
     -- Reset module caches
     _utils = nil
@@ -1473,5 +1754,73 @@ if sim_board and sim_board.simulation_board and sim_board.simulation_board.remov
     
     printf("[FA] Monkeypatched sim_board.remove_squad for CTD prevention")
 end
+
+------------------------------------------------------------
+-- Monkeypatch: Item compensation (cloned from original mod)
+-- Replaces item rewards with money before task callback runs
+------------------------------------------------------------
+
+-- Store original callback in GLOBAL (like original mod)
+task_manager_task_callback = task_manager.task_callback
+task_manager.task_callback = function(tsk, stage)
+    local tsk_id = tsk:get_id()
+    
+    printf("[FA] task_callback fired: task=%s stage=%s autocomplete_flag=%s", 
+        tostring(tsk_id), tostring(stage), tostring(_tasks_being_autocompleted[tsk_id] or false))
+    
+    -- Only compensate tasks that are being autocompleted by our mod
+    if not _tasks_being_autocompleted[tsk_id] then
+        task_manager_task_callback(tsk, stage)
+        return
+    end
+    
+    -- Clear flag now that we've seen it (prevent memory leak)
+    _tasks_being_autocompleted[tsk_id] = nil
+    
+    -- Check if user wants to compensate items
+    if not get_mcm_config(nil, "enable") or not get_mcm_config(nil, "compensate_item_rewards") then
+        printf("[FA] task_callback: compensation disabled in MCM")
+        task_manager_task_callback(tsk, stage)
+        return
+    end
+    
+    -- Check if last stage (completed)
+    if stage ~= task.completed then
+        printf("[FA] task_callback: not completed stage")
+        task_manager_task_callback(tsk, stage)
+        return
+    end
+    
+    -- Get task info
+    local rtask = task_manager.get_task_manager().task_info[tsk_id]
+    if not rtask or not rtask.on_complete or not rtask.on_complete[1] or not rtask.on_complete[1][3] then
+        printf("[FA] task_callback: no on_complete data")
+        task_manager_task_callback(tsk, stage)
+        return
+    end
+    
+    -- Get task compensation prices (try to calculate if not cached)
+    local compensation = _task_compensation_prices[tsk_id]
+    if not compensation then
+        printf("[FA] task_callback: calculating compensation for %s", tostring(tsk_id))
+        compensation = calculate_task_compensation(rtask.on_complete[1][3])
+        _task_compensation_prices[tsk_id] = compensation
+    end
+    
+    if not compensation or not compensation.rewards then
+        printf("[FA] task_callback: no compensation calculated")
+        task_manager_task_callback(tsk, stage)
+        return
+    end
+    
+    printf("[FA] Applying item compensation for task %s: " .. tostring(compensation.min or 0) .. "-" .. tostring(compensation.max or 0) .. " RU", tsk_id)
+    
+    -- Replace the reward table with cleaned version (items replaced with money)
+    rtask.on_complete[1][3] = compensation.rewards
+    
+    task_manager_task_callback(tsk, stage)
+end
+
+printf("[FA] Monkeypatched task_manager.task_callback for item compensation")
 
 printf("[FA] Core script loaded successfully")
