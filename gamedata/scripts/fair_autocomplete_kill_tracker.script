@@ -1,29 +1,13 @@
 -- Fair Autocomplete - Kill Tracker
--- Tracks kills by player and companions for task validation
+-- tracks kills by player and companions for task validation
 
--- Storage for tracked kills
--- Format: { [victim_id] = { killer_id, time, section, location, is_player_kill, is_companion_kill } }
 _player_kills = {}
-
--- Storage for tracked hits (who shot the target before death)
--- Format: { [victim_id] = { [shooter_id] = { is_player, is_companion, hit_count } } }
 _player_hits = {}
-
--- Storage for task targets we're monitoring
--- Format: { [task_id] = { targets = {id1, id2, ...}, smart_terrain = "smart_name", type = "assault/bounty/mutant" } }
 _monitored_tasks = {}
-
--- Storage for assault task initial enemy counts
--- Format: { [task_id] = { total = N, killed_by_player = M, smart_terrain = "smart_name" } }
 _assault_task_data = {}
-
--- Storage for mutant hunt task data
--- Format: { [task_id] = { smart_terrain = "smart_name", mutant_section = "section", killed_count = N } }
 _mutant_task_data = {}
 
-------------------------------------------------------------
--- Utility Functions
-------------------------------------------------------------
+-- ### UTILITY FUNCTIONS
 
 local function get_mcm_config(category, key)
     if fair_autocomplete_mcm and fair_autocomplete_mcm.get_config then
@@ -48,11 +32,9 @@ local function is_companion(obj)
     local obj_id = obj:id()
     if obj_id == AC_ID then return false end
     
-    -- Check if NPC is in a companion squad
     local se_obj = alife_object(obj_id)
     if not se_obj then return false end
     
-    -- Check axr_companions system
     if axr_companions and axr_companions.companion_squads then
         local squad_id = se_obj.group_id
         if squad_id and axr_companions.companion_squads[squad_id] then
@@ -60,7 +42,6 @@ local function is_companion(obj)
         end
     end
     
-    -- Alternative check via info portion
     local game_obj = level.object_by_id(obj_id)
     if game_obj and game_obj.has_info then
         if game_obj:has_info("npcx_is_companion") then
@@ -142,9 +123,7 @@ local function get_object_smart_terrain(obj)
     return nil
 end
 
-------------------------------------------------------------
--- Hit Recording Functions
-------------------------------------------------------------
+-- ### HIT RECORDING
 
 function record_hit(victim, shooter)
     if not victim or not shooter then return end
@@ -155,17 +134,14 @@ function record_hit(victim, shooter)
     local is_player = is_actor(shooter)
     local is_comp = is_companion(shooter)
     
-    -- Only record if hit by player or companion
     if not is_player and not is_comp then
         return
     end
     
-    -- Initialize hit tracking for this victim
     if not _player_hits[victim_id] then
         _player_hits[victim_id] = {}
     end
     
-    -- Record or update hit data
     if not _player_hits[victim_id][shooter_id] then
         _player_hits[victim_id][shooter_id] = {
             is_player = is_player,
@@ -190,7 +166,6 @@ function monster_on_hit_callback(monster, amount, local_direction, who, bone_ind
     record_hit(monster, who)
 end
 
--- Check if victim was hit by player or companion before death
 function was_hit_by_player_or_companion(victim_id)
     local hit_data = _player_hits[victim_id]
     if not hit_data then
@@ -214,9 +189,7 @@ function was_hit_by_player_or_companion(victim_id)
     return false
 end
 
-------------------------------------------------------------
--- Kill Recording Functions
-------------------------------------------------------------
+-- ### KILL RECORDING
 
 function record_kill(victim, killer, is_monster)
     if not victim then return end
@@ -339,33 +312,26 @@ function monster_on_death_callback(monster, who)
     record_kill(monster, who, true)
 end
 
-------------------------------------------------------------
--- Kill Query Functions
-------------------------------------------------------------
+-- ### KILL QUERY
 
--- Check if kill should count based on distance (if MCM option enabled)
 function is_within_valid_distance(victim_id)
     local max_distance = get_mcm_config(nil, "max_kill_distance") or 0
     
-    -- 0 means distance check disabled
     if max_distance == 0 then
         return true
     end
     
     local kill_data = _player_kills[victim_id]
     if not kill_data or not kill_data.actor_distance then
-        -- If we don't have distance data, assume valid (kill was by player/companion anyway)
         return true
     end
     
     return kill_data.actor_distance <= max_distance
 end
 
--- Check if kill happened on the same level as actor
 function is_same_level_kill(victim_id)
     local require_same_level = get_mcm_config(nil, "require_same_level")
     
-    -- If option disabled, always return true
     if not require_same_level then
         return true
     end
@@ -375,9 +341,8 @@ function is_same_level_kill(victim_id)
         return false
     end
     
-    -- If we don't have level data, check hit data (player was involved at some point)
     if not kill_data.actor_level or not kill_data.victim_level then
-        return true  -- Can't verify, assume valid
+        return true
     end
     
     return kill_data.actor_level == kill_data.victim_level
@@ -386,7 +351,6 @@ end
 function was_killed_by_player_or_companion(victim_id)
     local kill_data = _player_kills[victim_id]
     
-    -- Check direct kill
     if kill_data then
         local companion_kills_count = get_mcm_config(nil, "companion_kills_count")
         if companion_kills_count == nil then
@@ -401,7 +365,6 @@ function was_killed_by_player_or_companion(victim_id)
         end
         
         if killed_by_valid then
-            -- Also check distance and level requirements
             if is_within_valid_distance(victim_id) and is_same_level_kill(victim_id) then
                 return true
             else
@@ -412,10 +375,9 @@ function was_killed_by_player_or_companion(victim_id)
         end
     end
     
-    -- Check if player/companion hit the target (assists count)
     local count_assists = get_mcm_config(nil, "count_assists")
     if count_assists == nil then
-        count_assists = true  -- Default enabled
+        count_assists = true
     end
     
     if count_assists and was_hit_by_player_or_companion(victim_id) then
@@ -436,7 +398,6 @@ function was_killed_by_player_only(victim_id)
         return false
     end
     
-    -- Check distance and level
     return is_within_valid_distance(victim_id) and is_same_level_kill(victim_id)
 end
 
@@ -448,9 +409,7 @@ function get_hit_data(victim_id)
     return _player_hits[victim_id]
 end
 
-------------------------------------------------------------
--- Assault Task Tracking
-------------------------------------------------------------
+-- ### ASSAULT TASK TRACKING
 
 function register_assault_task(task_id, smart_terrain_name)
     if not smart_terrain_name then
@@ -458,7 +417,6 @@ function register_assault_task(task_id, smart_terrain_name)
         return
     end
     
-    -- Count initial enemies at smart terrain
     local enemy_count = count_enemies_at_smart(smart_terrain_name)
     
     _assault_task_data[task_id] = {
@@ -587,9 +545,7 @@ function unregister_assault_task(task_id)
     _assault_task_data[task_id] = nil
 end
 
-------------------------------------------------------------
--- Mutant Task Tracking
-------------------------------------------------------------
+-- ### MUTANT TASK TRACKING
 
 function register_mutant_task(task_id, smart_terrain_name, mutant_section)
     _mutant_task_data[task_id] = {
@@ -604,23 +560,18 @@ end
 
 function update_mutant_task_kills(section, smart_terrain, monster_type)
     for task_id, data in pairs(_mutant_task_data) do
-        -- Match on monster_type (squad player_id like "monster_vegetarian") OR exact section
         local section_match = false
         if not data.mutant_section then
-            -- No section requirement - any mutant counts
             section_match = true
         elseif monster_type and data.mutant_section == monster_type then
-            -- Match on monster type (e.g., "monster_vegetarian" == "monster_vegetarian")
             section_match = true
         elseif data.mutant_section == section then
-            -- Fallback: exact section match (e.g., "boar_strong" == "boar_strong")
             section_match = true
         end
         
         local location_match = (not data.smart_terrain) or (data.smart_terrain == smart_terrain)
         
         if section_match and location_match then
-            -- Defensive: ensure killed_count is a number
             data.killed_count = (tonumber(data.killed_count) or 0) + 1
             dbg_printf("[FA-KillTracker] Mutant task %s: player killed section=%s monster_type=%s at %s (total: %d)",
                 task_id, section, monster_type or "unknown", smart_terrain or "unknown", data.killed_count)
@@ -634,7 +585,6 @@ function check_mutant_task_requirement(task_id)
         return false
     end
     
-    -- Defensive: ensure killed_count is a number
     local killed = tonumber(data.killed_count) or 0
     return killed >= 1
 end
@@ -643,11 +593,8 @@ function unregister_mutant_task(task_id)
     _mutant_task_data[task_id] = nil
 end
 
-------------------------------------------------------------
--- Offline Death Detection
-------------------------------------------------------------
+-- ### OFFLINE DEATH DETECTION
 
--- Check if a target still exists in A-Life
 function is_target_alive(target_id)
     if not target_id then return false end
     
@@ -656,36 +603,29 @@ function is_target_alive(target_id)
         return false
     end
     
-    -- Check if it's actually alive (not just existing in A-Life)
-    -- Use pcall to safely check alive() method
     local success, is_alive = pcall(function()
         if se_obj.alive then
             return se_obj:alive()
         end
-        return true -- Assume alive if no alive() method
+        return true
     end)
     
     if not success then
-        -- If we couldn't check, assume alive to be safe
         return true
     end
     
     return is_alive
 end
 
--- Check if target died without player involvement (offline or by others)
 function did_target_die_without_player(target_id)
-    -- Target still alive
     if is_target_alive(target_id) then
         return false, "alive"
     end
     
-    -- Target is dead - check if we have a kill record that counts
     if was_killed_by_player_or_companion(target_id) then
         return false, "player_killed"
     end
     
-    -- Check if player at least hit the target (assist counts)
     local count_assists = get_mcm_config(nil, "count_assists")
     if count_assists == nil then
         count_assists = true
@@ -695,18 +635,10 @@ function did_target_die_without_player(target_id)
         return false, "player_assisted"
     end
     
-    -- Target is dead and we don't have a valid player involvement
-    -- This means either:
-    -- 1. Died offline (A-Life simulation)
-    -- 2. Killed by another NPC while online but not by player/companion
-    -- 3. Killed too far from player (if distance check enabled)
-    -- 4. Killed on different level (if same level check enabled)
     return true, "stolen"
 end
 
-------------------------------------------------------------
--- Persistence (Save/Load)
-------------------------------------------------------------
+-- ### PERSISTENCE
 
 function save_state(m_data)
     m_data.fa_player_kills = _player_kills
@@ -724,13 +656,10 @@ function load_state(m_data)
     _monitored_tasks = m_data.fa_monitored_tasks or {}
 end
 
-------------------------------------------------------------
--- Cleanup
-------------------------------------------------------------
+-- ### CLEANUP
 
--- Remove old kill records to prevent memory bloat
 function cleanup_old_kills(max_age_seconds)
-    max_age_seconds = max_age_seconds or 172800 -- Default 48 hours in seconds (48*60*60)
+    max_age_seconds = max_age_seconds or 172800
     
     local current_time = os.time()
     local removed_kills = 0
@@ -794,26 +723,18 @@ function cleanup_old_kills(max_age_seconds)
     end
 end
 
-------------------------------------------------------------
--- Initialization
-------------------------------------------------------------
+-- ### INITIALIZATION
 
 function on_game_start()
-    -- Death callbacks (for recording kills)
     RegisterScriptCallback("npc_on_death_callback", npc_on_death_callback)
     RegisterScriptCallback("monster_on_death_callback", monster_on_death_callback)
-    
-    -- Hit callbacks (for recording assists)
     RegisterScriptCallback("npc_on_hit_callback", npc_on_hit_callback)
     RegisterScriptCallback("monster_on_hit_callback", monster_on_hit_callback)
-    
-    -- Persistence
     RegisterScriptCallback("save_state", save_state)
     RegisterScriptCallback("load_state", load_state)
     
-    -- Periodic cleanup (every 10 minutes real-time, cleans kills older than 48 hours)
     CreateTimeEvent("fa_kill_tracker", "cleanup", 600, function()
-        cleanup_old_kills(172800)  -- 48 hours in seconds
+        cleanup_old_kills(172800)
         ResetTimeEvent("fa_kill_tracker", "cleanup", 600)
         return false
     end)

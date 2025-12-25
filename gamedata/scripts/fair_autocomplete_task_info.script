@@ -8,11 +8,7 @@ local function get_mcm_config(category, key)
     end
     return nil
 end
-
-------------------------------------------------------------
 -- Monster Name Mapping
-------------------------------------------------------------
-
 local monster_names = {
     [clsid.bloodsucker]     = "bloodsucker",
     [clsid.bloodsucker_s]   = "bloodsucker",
@@ -46,11 +42,7 @@ local monster_names = {
     [clsid.zombie]          = "zombie",
     [clsid.zombie_s]        = "zombie",
 }
-
-------------------------------------------------------------
 -- Color Helpers
-------------------------------------------------------------
-
 local function get_faction_color(se_obj)
     if not se_obj then return "%c[255,255,255,1]" end
     
@@ -77,11 +69,7 @@ local function get_reputation_color(reputation)
     end
     return "%c[255,255,255,1]"  -- White for neutral
 end
-
-------------------------------------------------------------
 -- Character Description Builder
-------------------------------------------------------------
-
 function build_character_description(se_obj, include_location)
     if not se_obj then return "" end
     
@@ -159,11 +147,7 @@ function build_character_description(se_obj, include_location)
     
     return table.concat(lines, " \\n ")
 end
-
-------------------------------------------------------------
 -- Monster Description
-------------------------------------------------------------
-
 function get_monster_name(obj)
     if not obj then return "???" end
     
@@ -215,11 +199,7 @@ function build_monster_description(se_obj, include_location)
     
     return table.concat(lines, " \\n ")
 end
-
-------------------------------------------------------------
 -- Squad Info
-------------------------------------------------------------
-
 function get_squad_info(squad_id)
     local squad = alife_object(squad_id)
     if not squad then return "", "" end
@@ -246,11 +226,7 @@ function get_squad_info(squad_id)
     local news_text = table.concat(members, " \\n \\n ")
     return news_text, news_caption
 end
-
-------------------------------------------------------------
 -- Target Info Display
-------------------------------------------------------------
-
 function get_target_info(target_id, is_squad)
     if not target_id then return "", "" end
     
@@ -275,11 +251,7 @@ function get_target_info(target_id, is_squad)
     -- Single stalker
     return build_character_description(se_obj, true), ""
 end
-
-------------------------------------------------------------
 -- Task Info Hooks (standalone implementation)
-------------------------------------------------------------
-
 -- Store original functions
 local _original_bounty_postpone = nil
 local _original_assault_postpone = nil
@@ -350,11 +322,7 @@ function hook_assault_task_info(task_id, squad_id)
         return true
     end)
 end
-
-------------------------------------------------------------
 -- Display Target Info for Active Task
-------------------------------------------------------------
-
 function show_active_task_target_info(task_id)
     if not task_id then return end
     
@@ -420,11 +388,7 @@ function show_active_task_target_info(task_id)
         db.actor:give_talk_message2(news_caption, news_text, "", "iconed_answer_item")
     end
 end
-
-------------------------------------------------------------
 -- Initialization
-------------------------------------------------------------
-
 function on_game_start()
     -- We don't hook vanilla functions to stay standalone
     -- Instead, our main mod can call these functions when appropriate

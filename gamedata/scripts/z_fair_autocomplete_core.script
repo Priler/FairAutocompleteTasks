@@ -1,11 +1,9 @@
 -- Fair Autocomplete - Core Script
--- Autocompletes tasks only when player/companions actually did the work
+-- autocompletes tasks only when player/companions actually did the work
 
 printf("[FA] Core script loading...")
 
-------------------------------------------------------------
--- Module References
-------------------------------------------------------------
+-- ### MODULE REFERENCES
 
 local function get_mcm_config(category, key)
     if fair_autocomplete_mcm and fair_autocomplete_mcm.get_config then
@@ -55,9 +53,7 @@ local function get_mcm_config(category, key)
     return defaults[key]
 end
 
-------------------------------------------------------------
--- Hardcoded Blacklist (main quests, special tasks)
-------------------------------------------------------------
+-- ### HARDCODED BLACKLIST
 
 local HARDCODED_BLACKLIST = {
     ["task_fanat_training_1"] = true,
@@ -80,9 +76,7 @@ local HARDCODED_BLACKLIST = {
     ["mar_base_owl_stalker_trader_task_2"] = true,
 }
 
-------------------------------------------------------------
--- State
-------------------------------------------------------------
+-- ### STATE
 
 local _mod_ready = false
 _task_cache = {}
@@ -90,9 +84,9 @@ _task_cache_count = 0  -- Track cache size
 local _registered_tasks = {}
 local _recently_processed = {}  -- Tasks recently completed/cancelled (prevent duplicates)
 _task_compensation_prices = {}  -- Cache for item reward compensation (GLOBAL for task_callback)
-_tasks_being_autocompleted = {}  -- Track tasks currently being autocompleted by our mod
+_tasks_being_autocompleted = {}
 
--- Module cache (performance optimization)
+-- module cache
 local _utils = nil
 local function get_utils()
     if not _utils then
@@ -109,14 +103,14 @@ local function get_kill_tracker()
     return _kill_tracker
 end
 
--- Cleanup old task cache entries (prevent memory growth)
+-- cleanup old task cache entries
 local function cleanup_task_cache()
     if _task_cache_count > 200 then
         _task_cache = {}
         _task_cache_count = 0
     end
     
-    -- Cleanup old recently_processed entries (older than 60 seconds)
+    -- cleanup old recently_processed entries (older than 60 seconds)
     local current_time = os.time()
     for task_id, processed_time in pairs(_recently_processed) do
         if current_time - processed_time > 60 then
@@ -125,12 +119,10 @@ local function cleanup_task_cache()
     end
 end
 
-------------------------------------------------------------
--- Task Functor Mapping
-------------------------------------------------------------
+-- ### TASK FUNCTOR MAPPING
 
 local TASK_FUNCTOR_MAP = {
-    -- Kill tasks (require validation)
+    -- kill tasks (require validation)
     ["assault_task_target_functor"] = { key = "assault", type = "assault" },
     ["task_targets_lostzone_all"] = { key = "assault", type = "assault" },
     ["general_bounty_task"] = { key = "bounty", type = "bounty" },
@@ -141,10 +133,10 @@ local TASK_FUNCTOR_MAP = {
     ["hunter_kill_target"] = { key = "mutant_hunt", type = "mutant_hunt" },
     ["veh_destroy_tf"] = { key = "destroy_btrs", type = "assault" },
     
-    -- Defense tasks (require kills at location)
+    -- defense tasks
     ["gd_task_target_functor"] = { key = "defense", type = "defense" },
     
-    -- Non-kill tasks (no validation needed)
+    -- non-kill tasks
     ["simulation_task_target"] = { key = "hostage", type = "hostage" },
     ["spy_task_target_functor"] = { key = "spy_extract", type = "spy" },
     ["general_fate"] = { key = "fate", type = "fate" },
@@ -154,14 +146,12 @@ local TASK_FUNCTOR_MAP = {
     ["anomaly_scanner_task_target"] = { key = "scanner", type = "scanner" },
 }
 
--- Specific task IDs that should be treated as a certain type (overrides functor detection)
--- Format: [task_id] = { key = "mcm_key", type = "task_type" }
+-- task IDs that should be treated as a certain type (overrides functor detection)
 local TASK_ID_OVERRIDES = {
-    -- Duty "Find missing Dutyer" task - treat as fate task
     ["bar_dolg_general_petrenko_stalker_task_rioc_pol"] = { key = "fate", type = "fate" },
 }
 
--- Tasks that start with these prefixes are mutant hunts even if using assault functor
+-- tasks that start with these prefixes are mutant hunts
 local MUTANT_HUNT_TASK_PREFIXES = {
     "hunter_",
 }
@@ -173,12 +163,10 @@ local KILL_VALIDATION_TYPES = {
     ["defense"] = true,
 }
 
-------------------------------------------------------------
--- Helper Functions
-------------------------------------------------------------
+-- ### HELPER FUNCTIONS
 
 local function is_task_type_enabled(target_functor, task_id)
-    -- Check task ID overrides first
+    -- check task ID overrides first
     if task_id and TASK_ID_OVERRIDES[task_id] then
         local override = TASK_ID_OVERRIDES[task_id]
         return get_mcm_config(nil, override.key)
@@ -190,12 +178,12 @@ local function is_task_type_enabled(target_functor, task_id)
 end
 
 local function get_task_type(target_functor, task_id)
-    -- Check task ID overrides first
+    -- check task ID overrides first
     if task_id and TASK_ID_OVERRIDES[task_id] then
         return TASK_ID_OVERRIDES[task_id].type
     end
     
-    -- Check if task_id matches mutant hunt prefixes
+    -- check if task_id matches mutant hunt prefixes
     if task_id then
         for _, prefix in ipairs(MUTANT_HUNT_TASK_PREFIXES) do
             if task_id:sub(1, #prefix) == prefix then
@@ -208,7 +196,7 @@ local function get_task_type(target_functor, task_id)
     return info and info.type or "unknown"
 end
 
--- Random stolen task messages
+-- random stolen task messages
 local STOLEN_MESSAGE_IDS = {
     "st_fa_task_stolen_msg_1",
     "st_fa_task_stolen_msg_2",
@@ -218,21 +206,17 @@ local STOLEN_MESSAGE_IDS = {
 local function show_stolen_message(task_id, task_giver_id)
     if not db.actor then return end
     
-    -- Check if showing stolen message is enabled
     if not get_mcm_config(nil, "show_stolen_message") then return end
     
-    -- Pick a random message
     local msg_id = STOLEN_MESSAGE_IDS[math.random(#STOLEN_MESSAGE_IDS)]
     local msg = game.translate_string(msg_id)
     if not msg or msg == msg_id then
-        -- Fallback if translation not found
         msg = "Someone else completed your task target. Task cancelled without penalty."
     end
     
     local header = "PDA"
     local icon = "ui_inGame2_PD_Otmena_zadaniya"
     
-    -- Try to get task giver info
     if task_giver_id then
         local se_obj = alife_object(task_giver_id)
         if se_obj then
@@ -247,30 +231,23 @@ local function show_stolen_message(task_id, task_giver_id)
         end
     end
     
-    -- Format message with color
     msg = "%c[default]" .. msg
     
-    -- Play PDA sound
     if xr_sound and xr_sound.set_sound_play then
         xr_sound.set_sound_play(AC_ID, "pda_tips")
     end
     
-    -- Send news directly (timeout=0, showtime=5000ms)
     db.actor:give_game_news(header, msg, icon, 0, 5000)
 end
 
--- Show PDA message when task is autocompleted (like original mod)
+-- show PDA message when task is autocompleted
 local function show_completion_message(task_id, task_giver_id)
     if not db.actor then return end
     
-    -- Get task completion description from cache
     local tsk = _task_cache[task_id]
     local finish_message = tsk and tsk.task_complete_descr
     
-    if not finish_message then
-        -- No completion message defined - skip
-        return
-    end
+    if not finish_message then return end
     
     local sender_obj = alife_object(task_giver_id)
     if not sender_obj then
@@ -278,7 +255,7 @@ local function show_completion_message(task_id, task_giver_id)
         return
     end
     
-    -- Handle squad task givers (some tasks use squad ID as giver)
+    -- handle squad task givers
     if sender_obj:clsid() == clsid.online_offline_group_s then
         local commander_obj = alife_object(sender_obj:commander_id())
         if not commander_obj then
@@ -288,34 +265,26 @@ local function show_completion_message(task_id, task_giver_id)
         sender_obj = commander_obj
     end
     
-    -- Validate sender object has required methods
     if not sender_obj.character_name or not sender_obj.community or not sender_obj.character_icon then
         printf("[FA] Couldn't send completion message: task giver is invalid")
         return
     end
     
-    -- Play PDA sound
     if xr_sound and xr_sound.set_sound_play then
         xr_sound.set_sound_play(AC_ID, "pda_tips")
     end
     
-    -- Build message
     local message_title = string.format("%s, %s", 
         sender_obj:character_name(), 
         game.translate_string(sender_obj:community()))
     
     local icon = sender_obj:character_icon()
     
-    -- Send the completion news
     db.actor:give_game_news(message_title, game.translate_string(finish_message), icon, 0, 5000)
 end
 
-------------------------------------------------------------
--- Item Compensation (calculate money value of item rewards)
-------------------------------------------------------------
+-- ### ITEM COMPENSATION
 
--- Calculate task compensation (cloned from original Autocomplete Tasks mod)
--- GLOBAL function for access from task_callback hook
 function calculate_task_compensation(reward_table)
     if not reward_table then return nil end
     
@@ -395,7 +364,7 @@ function calculate_task_compensation(reward_table)
     return { rewards = cleaned_rewards, min = min_reward, max = max_reward }
 end
 
--- Cache compensation prices (called during task registration)
+-- cache compensation prices during task registration
 local function cache_compensation_prices(task_id)
     if _task_compensation_prices[task_id] then return end
     
@@ -415,14 +384,12 @@ local function cache_compensation_prices(task_id)
     end
 end
 
-------------------------------------------------------------
--- Task Registration
-------------------------------------------------------------
+-- ### TASK REGISTRATION
 
 local function register_task(task_id)
     local current_time = os.time()
     
-    -- If task already registered, update timestamp (handles re-taken tasks)
+    -- update timestamp for re-taken tasks
     if _registered_tasks[task_id] then
         _registered_tasks[task_id].registered_time = current_time
         printf("[FA] Task re-registered (re-taken): %s - updated timestamp", task_id)
@@ -441,7 +408,6 @@ local function register_task(task_id)
     
     if not tsk or not tsk.target_functor then return end
     
-    -- Cache compensation prices for item rewards
     cache_compensation_prices(task_id)
     
     local task_type = get_task_type(tsk.target_functor, task_id)
@@ -451,7 +417,7 @@ local function register_task(task_id)
         type = task_type,
         target_id = nil,
         smart_terrain = nil,
-        registered_time = current_time,  -- Track when task was registered
+        registered_time = current_time,
     }
     
     if task_type == "bounty" then
@@ -469,24 +435,20 @@ local function register_task(task_id)
             end
         end
     elseif task_type == "mutant_hunt" then
-        -- Mutant hunts can have either a specific target OR a location
+        -- mutant hunts can have either a specific target or a location
         if var then
-            -- Try to get target_id (for bounty-style mutant tasks like Hunter's)
             if var.target_id then
                 reg_data.target_id = var.target_id
-                -- Try to get the section of the target mutant
                 local se_obj = alife_object(var.target_id)
                 if se_obj then
                     reg_data.mutant_section = se_obj:section_name()
                 end
             end
             
-            -- KEY: For assault-type mutant tasks, the squad's player_id contains the monster type
-            -- This is how the game identifies what type of mutant (dog, boar, bloodsucker, etc.)
+            -- squad's player_id contains the monster type
             if var.squad_id and not reg_data.mutant_section then
                 local squad = alife_object(var.squad_id)
                 if squad then
-                    -- Method 1: player_id for monster squads is the monster type
                     if squad.player_id then
                         if is_squad_monster and is_squad_monster[squad.player_id] then
                             reg_data.mutant_section = squad.player_id
@@ -494,14 +456,13 @@ local function register_task(task_id)
                         end
                     end
                     
-                    -- Method 2: Fallback - get section from first squad member
+                    -- fallback: get section from first squad member
                     if not reg_data.mutant_section and squad.squad_members then
                         for member in squad:squad_members() do
                             local se_member = member.object or (member.id and alife_object(member.id))
                             if se_member then
                                 local sec = se_member:section_name()
                                 if sec then
-                                    -- Extract base type (e.g., "dog" from "dog_blind")
                                     local base_type = string.match(sec, "^([^_]+)")
                                     if base_type and is_squad_monster and is_squad_monster[base_type] then
                                         reg_data.mutant_section = base_type
@@ -517,13 +478,14 @@ local function register_task(task_id)
                 end
             end
             
-            -- Try to get mutant type/section from task variables (try many possible names)
+            -- try to get mutant type from task variables
             if not reg_data.mutant_section then
                 reg_data.mutant_section = var.mutant_type or var.monster_type or var.section 
                     or var.monster or var.target_section or var.enemy_section
                     or var.mutant or var.creature or var.creature_type
             end
-            -- Try to get smart terrain from multiple possible fields
+            
+            -- try smart terrain from multiple fields
             if var.smart_id then
                 local smart_obj = alife_object(var.smart_id)
                 if smart_obj then
@@ -540,7 +502,7 @@ local function register_task(task_id)
                 end
             end
             
-            -- Debug: dump all var keys to help find the right one
+            -- debug: dump var keys if we couldn't find section
             if not reg_data.mutant_section then
                 local var_keys = {}
                 for k, v in pairs(var) do
@@ -550,7 +512,7 @@ local function register_task(task_id)
             end
         end
         
-        -- Also try to get mutant section from task definition
+        -- try to get mutant section from task definition
         if not reg_data.mutant_section then
             local tsk = _task_cache[task_id]
             if tsk then
@@ -569,46 +531,36 @@ local function unregister_task(task_id)
     _registered_tasks[task_id] = nil
 end
 
-------------------------------------------------------------
--- Kill Validation
-------------------------------------------------------------
+-- ### KILL VALIDATION
 
--- Helper to safely get time as number (handles old CTime userdata and new os.time numbers)
+-- safely get time as number
 local function get_time_as_number(time_value)
     if not time_value then return 0 end
     if type(time_value) == "number" then return time_value end
-    -- Old CTime userdata or other types - treat as invalid (return 0)
     return 0
 end
 
--- Get task registered time safely, setting it if missing or invalid
+-- get task registered time safely
 local function get_task_registered_time(reg)
-    if not reg then return os.time() end  -- No registration data, use current time
+    if not reg then return os.time() end
     
     local reg_time = reg.registered_time
-    -- Check for valid timestamp: must be a number AND greater than 0
-    -- (os.time() returns seconds since 1970, so valid values are large numbers)
     if reg_time and type(reg_time) == "number" and reg_time > 1000000000 then
         return reg_time
     end
     
-    -- Missing, invalid type, or suspiciously small (0, old CTime conversion) - set to current time
     reg.registered_time = os.time()
     printf("[FA] Fixed invalid registered_time, new value: " .. tostring(reg.registered_time))
     return reg.registered_time
 end
 
--- Mapping of section prefixes to monster squad types
--- Based on simulation_objects.script squad definitions
--- Note: _day and _night are normalized during matching, so we use base types
+-- section prefix to monster squad type mapping
 local SECTION_TO_MONSTER_TYPE = {
-    -- monster_vegetarian (herbivores/passive)
     ["boar"] = "monster_vegetarian",
     ["flesh"] = "monster_vegetarian",
     ["tushkano"] = "monster_vegetarian",
     ["rat"] = "monster_vegetarian",
     
-    -- monster_predatory (predators - same monsters spawn day/night)
     ["dog"] = "monster_predatory",
     ["pseudodog"] = "monster_predatory",
     ["psy_dog"] = "monster_predatory",
@@ -616,12 +568,10 @@ local SECTION_TO_MONSTER_TYPE = {
     ["chimera"] = "monster_predatory",
     ["lurker"] = "monster_predatory",
     
-    -- monster_zombied (zombies/snorks - same monsters spawn day/night)
     ["zombie"] = "monster_zombied",
     ["snork"] = "monster_zombied",
     ["fracture"] = "monster_zombied",
     
-    -- monster_special (special creatures)
     ["bloodsucker"] = "monster_special",
     ["controller"] = "monster_special",
     ["burer"] = "monster_special",
@@ -631,11 +581,10 @@ local SECTION_TO_MONSTER_TYPE = {
     ["psysucker"] = "monster_special",
 }
 
--- Infer monster type from section name (fallback when monster_type not recorded)
+-- infer monster type from section name
 local function infer_monster_type_from_section(section)
     if not section then return nil end
     
-    -- Check each prefix
     for prefix, monster_type in pairs(SECTION_TO_MONSTER_TYPE) do
         if string.find(section, prefix, 1, true) == 1 then
             return monster_type
@@ -645,47 +594,38 @@ local function infer_monster_type_from_section(section)
     return nil
 end
 
--- Check if a killed creature section matches the required section for a task
--- Handles partial matches like "dog" matching "dog_blind", "dog_strong", etc.
+-- check if killed creature section matches required section
 local function section_matches(kill_section, required_section, monster_type)
-    -- If we don't know what section is required, we can't validate - return false
-    -- This prevents random monster kills from counting for unknown task types
     if not required_section then return false end
     if not kill_section then return false end
     
-    -- Helper to strip _day/_night suffix from monster types for comparison
-    -- monster_predatory_day and monster_predatory_night are the same monsters
+    -- strip _day/_night suffix from monster types
     local function normalize_monster_type(mtype)
         if not mtype then return nil end
         local normalized = mtype:gsub("_day$", ""):gsub("_night$", "")
         return normalized
     end
     
-    -- Check if required_section is a monster category (squad player_id like "monster_vegetarian")
-    -- If so, match against monster_type instead of section
+    -- check if required_section is a monster category
     if string.find(required_section, "monster_", 1, true) == 1 then
         local required_normalized = normalize_monster_type(required_section)
         
-        -- If we have monster_type from kill data, use it
         if monster_type then
             local kill_normalized = normalize_monster_type(monster_type)
             
-            -- Exact match (after normalization)
             if kill_normalized == required_normalized then
                 return true
             end
-            -- Also check partial match for monster types
             if string.find(kill_normalized, required_normalized, 1, true) == 1 then
                 return true
             end
             if string.find(required_normalized, kill_normalized, 1, true) == 1 then
                 return true
             end
-            -- Monster category mismatch
             return false
         end
         
-        -- Fallback: infer monster_type from section name (for old kill records without monster_type)
+        -- fallback: infer monster_type from section name
         local inferred_type = infer_monster_type_from_section(kill_section)
         if inferred_type then
             local inferred_normalized = normalize_monster_type(inferred_type)
@@ -693,7 +633,6 @@ local function section_matches(kill_section, required_section, monster_type)
             if inferred_normalized == required_normalized then
                 return true
             end
-            -- Partial match
             if string.find(inferred_normalized, required_normalized, 1, true) == 1 then
                 return true
             end
@@ -702,20 +641,16 @@ local function section_matches(kill_section, required_section, monster_type)
             end
         end
         
-        -- Could not determine monster type - don't match
         return false
     end
     
-    -- Exact match
+    -- exact match
     if kill_section == required_section then return true end
     
-    -- Partial match: kill_section starts with required_section
-    -- e.g., "dog_blind" matches "dog", "boar_kaban" matches "boar"
-    -- Use plain string matching (position 1, 1, true for plain)
+    -- partial match: kill_section starts with required_section
     if string.find(kill_section, required_section, 1, true) == 1 then return true end
     
-    -- Also check if required_section is more specific
-    -- e.g., required "dog_blind" and killed "dog_blind" 
+    -- check if required_section is more specific
     if string.find(required_section, kill_section, 1, true) == 1 then return true end
     
     return false
@@ -762,7 +697,7 @@ local function validate_assault_kill(task_id)
         smart_name = reg.smart_terrain
     end
     
-    -- Get smart_id from task var
+    -- get smart_id from task var
     local var = load_var(db.actor, task_id)
     if var and var.smart_id then
         smart_id = var.smart_id
@@ -771,7 +706,6 @@ local function validate_assault_kill(task_id)
             if not smart_name then
                 smart_name = smart_obj:name()
             end
-            -- Get position directly from server object
             if smart_obj.position then
                 smart_position = smart_obj.position
                 printf("[FA] validate_assault: got position from alife_object")
@@ -779,9 +713,8 @@ local function validate_assault_kill(task_id)
         end
     end
     
-    -- Fallback: Get smart position from SIMBOARD by name
+    -- fallback: get smart position from SIMBOARD by name
     if smart_name and not smart_position and SIMBOARD then
-        -- Try smarts_by_names first
         if SIMBOARD.smarts_by_names and SIMBOARD.smarts_by_names[smart_name] then
             local smart_data = SIMBOARD.smarts_by_names[smart_name]
             if smart_data and smart_data.smrt and smart_data.smrt.position then
@@ -790,7 +723,7 @@ local function validate_assault_kill(task_id)
             end
         end
         
-        -- Try iterating smarts table
+        -- try iterating smarts table
         if not smart_position and SIMBOARD.smarts then
             for id, smart_data in pairs(SIMBOARD.smarts) do
                 if smart_data.smrt and smart_data.smrt:name() == smart_name then
@@ -804,7 +737,7 @@ local function validate_assault_kill(task_id)
         end
     end
     
-    -- Fallback: Get position by smart_id directly from SIMBOARD
+    -- fallback: get position by smart_id directly
     if smart_id and not smart_position and SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart_id] then
         local smart_data = SIMBOARD.smarts[smart_id]
         if smart_data and smart_data.smrt and smart_data.smrt.position then
@@ -813,14 +746,13 @@ local function validate_assault_kill(task_id)
         end
     end
     
-    -- If we can't determine task location, don't autocomplete (let vanilla handle it)
+    -- can't determine task location, let vanilla handle it
     if not smart_name and not smart_position then
         return false, "no_smart_terrain"
     end
     
     printf("[FA] validate_assault: task=" .. tostring(task_id) .. " smart_terrain=" .. tostring(smart_name) .. " smart_id=" .. tostring(smart_id) .. " has_position=" .. tostring(smart_position ~= nil))
     
-    -- Get task registration time (only count kills AFTER task was taken)
     local task_registered_time = get_task_registered_time(reg)
     
     local tracker = get_kill_tracker()
@@ -830,18 +762,18 @@ local function validate_assault_kill(task_id)
         local total_kills_at_location = 0
         
         for victim_id, kill_data in pairs(tracker._player_kills) do
-            -- Only count kills that happened AFTER task was registered
+            -- only count kills after task was registered
             local kill_time = get_time_as_number(kill_data.time)
             if kill_time >= task_registered_time then
                 local location_match = false
                 local nearby_match = false
                 
-                -- Method 1: Exact smart terrain match
+                -- exact smart terrain match
                 if smart_name and kill_data.location == smart_name then
                     location_match = true
                 end
                 
-                -- Method 2: Position-based match (within 150m of task smart terrain)
+                -- position-based match (within 150m)
                 if smart_position and kill_data.position then
                     local kill_pos = kill_data.position
                     if type(kill_pos) == "table" and kill_pos.x then
@@ -871,35 +803,30 @@ local function validate_assault_kill(task_id)
             end
         end
         
-        -- Use the better count (location match OR nearby match)
+        -- use the better count
         local player_kills = math.max(player_kills_at_location, player_kills_nearby)
         
         printf("[FA] validate_assault: player_kills=" .. tostring(player_kills) .. " (at_location=" .. tostring(player_kills_at_location) .. " nearby=" .. tostring(player_kills_nearby) .. ") total=" .. tostring(total_kills_at_location) .. " at " .. tostring(smart_name))
         
-        -- Check against kill requirement setting
-        -- 1 = at least one, 2 = at least half, 3 = all enemies
+        -- check against kill requirement (1=one, 2=half, 3=all)
         local kill_req = tonumber(get_mcm_config(nil, "kill_requirement")) or 1
         
         printf("[FA] validate_assault: kill_req=" .. tostring(kill_req) .. " player_kills=" .. tostring(player_kills))
         
         if player_kills > 0 then
             if kill_req == 1 then
-                -- At least one player kill
                 return true, "kills_at_location"
             elseif kill_req == 2 then
-                -- At least half of recorded kills must be by player
                 if total_kills_at_location > 0 and player_kills >= (total_kills_at_location / 2) then
                     return true, "kills_at_location_half"
                 elseif total_kills_at_location == 0 then
                     return true, "kills_at_location"
                 end
             elseif kill_req == 3 then
-                -- All recorded kills must be by player (strict mode)
                 if total_kills_at_location > 0 and player_kills == total_kills_at_location then
                     return true, "kills_at_location_all"
                 end
             else
-                -- Unknown kill_req, default to at least one
                 return true, "kills_at_location"
             end
         end
@@ -930,10 +857,8 @@ local function validate_defense_kill(task_id)
         return false, "no_smart_terrain"
     end
     
-    -- Get task registration time (only count kills AFTER task was taken)
     local task_registered_time = get_task_registered_time(reg)
     
-    -- Get player faction
     local player_faction = nil
     if db.actor then
         local se_actor = alife():actor()
@@ -942,19 +867,18 @@ local function validate_defense_kill(task_id)
         end
     end
     
-    -- For defense: only count enemy NPC kills (not monsters)
+    -- only count enemy NPC kills (not monsters)
     local tracker = get_kill_tracker()
     if tracker and tracker._player_kills then
         local enemy_kills = 0
         for victim_id, kill_data in pairs(tracker._player_kills) do
-            -- Only count kills that happened AFTER task was registered
             local kill_time = get_time_as_number(kill_data.time)
             if kill_time >= task_registered_time then
                 if (kill_data.is_player_kill or kill_data.is_companion_kill) 
                    and kill_data.location == smart_name 
                    and not kill_data.is_monster 
                    and kill_data.faction then
-                    -- Check if victim was enemy faction
+                    -- check if victim was enemy
                     if player_faction and game_relations.is_factions_enemies(kill_data.faction, player_faction) then
                         enemy_kills = enemy_kills + 1
                     end
@@ -974,7 +898,7 @@ local function validate_mutant_hunt_kill(task_id)
     local smart_name = nil
     local smart_position = nil
     local target_id = nil
-    local required_section = nil  -- The mutant type we're hunting
+    local required_section = nil
     
     local reg = _registered_tasks[task_id]
     if reg then
@@ -983,11 +907,10 @@ local function validate_mutant_hunt_kill(task_id)
         required_section = reg.mutant_section
     end
     
-    -- Try multiple methods to get smart terrain and target
+    -- try multiple methods to get smart terrain and target
     if not smart_name or not target_id then
         local var = load_var(db.actor, task_id)
         if var then
-            -- Method 1: smart_id (numeric ID)
             if not smart_name and var.smart_id then
                 local smart_obj = alife_object(var.smart_id)
                 if smart_obj then
@@ -997,11 +920,11 @@ local function validate_mutant_hunt_kill(task_id)
                     end
                 end
             end
-            -- Method 2: smart (string name directly - used by Hunter tasks)
+            
+            -- smart string name (used by Hunter tasks)
             if not smart_name and var.smart then
                 if type(var.smart) == "string" then
                     smart_name = var.smart
-                    -- Try to get position from smart terrain by name
                     if SIMBOARD and SIMBOARD.smarts_by_names and SIMBOARD.smarts_by_names[var.smart] then
                         local smart = SIMBOARD.smarts_by_names[var.smart]
                         if smart and smart.position then
@@ -1018,15 +941,16 @@ local function validate_mutant_hunt_kill(task_id)
                     end
                 end
             end
-            -- Method 3: target_smart (another possible field)
+            
             if not smart_name and var.target_smart then
                 smart_name = var.target_smart
             end
-            -- Get specific target_id if exists (for bounty-style mutant tasks)
+            
             if not target_id and var.target_id then
                 target_id = var.target_id
             end
-            -- Try to get mutant section from var
+            
+            -- try to get mutant section from var
             if not required_section then
                 if var.mutant_type then
                     required_section = var.mutant_type
@@ -1037,17 +961,16 @@ local function validate_mutant_hunt_kill(task_id)
                 end
             end
             
-            -- KEY: For assault-type mutant tasks, get monster type from squad.player_id
+            -- get monster type from squad.player_id
             if not required_section and var.squad_id then
                 local squad = alife_object(var.squad_id)
                 if squad then
-                    -- Method 1: player_id
                     if squad.player_id and is_squad_monster and is_squad_monster[squad.player_id] then
                         required_section = squad.player_id
                         printf("[FA] Got mutant section from squad.player_id: " .. tostring(squad.player_id))
                     end
                     
-                    -- Method 2: Fallback - get from first squad member
+                    -- fallback: get from first squad member
                     if not required_section and squad.squad_members then
                         for member in squad:squad_members() do
                             local se_member = member.object or (member.id and alife_object(member.id))
@@ -1067,7 +990,6 @@ local function validate_mutant_hunt_kill(task_id)
                         end
                     end
                     
-                    -- Update the registration data for future lookups
                     if required_section and reg then
                         reg.mutant_section = required_section
                     end
@@ -1076,7 +998,7 @@ local function validate_mutant_hunt_kill(task_id)
         end
     end
     
-    -- If we have smart_name but no position, try to get it
+    -- try to get position if we have smart_name
     if smart_name and not smart_position then
         if SIMBOARD and SIMBOARD.smarts_by_names and SIMBOARD.smarts_by_names[smart_name] then
             local smart = SIMBOARD.smarts_by_names[smart_name]
@@ -1091,7 +1013,6 @@ local function validate_mutant_hunt_kill(task_id)
         return false, "no_tracker"
     end
     
-    -- Get task registration time (only count kills AFTER task was taken)
     local task_registered_time = get_task_registered_time(reg)
     
     -- Debug logging
@@ -1219,27 +1140,23 @@ local function validate_mutant_hunt_kill(task_id)
     return false, "no_kills_at_location"
 end
 
-------------------------------------------------------------
--- Autocomplete Check
-------------------------------------------------------------
+-- ### AUTOCOMPLETE CHECK
 
 local function is_in_list(list_str, task_id)
     if not list_str or list_str == "" or list_str == "none" then return false end
     for item in string.gmatch(list_str, "[^,]+") do
-        item = item:match("^%s*(.-)%s*$")  -- trim whitespace
-        -- Check if entry has stage override (task_id:stage) - extract just the task_id
+        item = item:match("^%s*(.-)%s*$")
         local item_task_id = item:match("^([^:]+)")
         if item_task_id and item_task_id == task_id then return true end
     end
     return false
 end
 
--- Get stage override from whitelist entry (returns nil if no override)
--- Format: "task_id:stage" e.g. "esc_2_12_stalker_fanat_task_3:0"
+-- get stage override from whitelist (e.g. "task_id:0")
 local function get_whitelist_stage_override(list_str, task_id)
     if not list_str or list_str == "" or list_str == "none" then return nil end
     for item in string.gmatch(list_str, "[^,]+") do
-        item = item:match("^%s*(.-)%s*$")  -- trim whitespace
+        item = item:match("^%s*(.-)%s*$")
         local item_task_id, item_stage = item:match("^([^:]+):(%d+)$")
         if item_task_id and item_task_id == task_id and item_stage then
             return tonumber(item_stage)
@@ -1249,7 +1166,6 @@ local function get_whitelist_stage_override(list_str, task_id)
 end
 
 local function should_autocomplete(task_id, task_info)
-    -- Skip tasks that were recently processed (prevents duplicate completions)
     if _recently_processed[task_id] then
         return false, "recently_processed"
     end
@@ -1395,16 +1311,12 @@ local function should_autocomplete(task_id, task_info)
     return true, "passed"
 end
 
-------------------------------------------------------------
--- Post-Completion Cleanup
-------------------------------------------------------------
+-- ### POST-COMPLETION CLEANUP
 
--- Cleanup after specific task types are completed
--- Prevents issues like rescued NPCs staying as broken companions
 local function post_completion_cleanup(task_id, target_functor)
     if not target_functor then return end
     
-    -- Spy extraction cleanup
+    -- spy extraction cleanup
     if target_functor == "spy_task_target_functor" then
         local var = load_var(db.actor, task_id)
         if not var then
@@ -1412,35 +1324,28 @@ local function post_completion_cleanup(task_id, target_functor)
             return
         end
         
-        -- Get spy object
         local spy_obj = var.spy_id and level.object_by_id(var.spy_id)
         if not spy_obj then
             printf("[FA] post_completion_cleanup: spy_obj is nil for task %s", task_id)
-            -- Still try to cleanup the squad
         end
         
-        -- Get squad
         local se_squad = var.squad_id and alife_object(var.squad_id)
         if not se_squad then
             printf("[FA] post_completion_cleanup: se_squad is nil for task %s", task_id)
             return
         end
         
-        -- Stop talking before cleanup (CTD prevention)
         if fair_autocomplete_utils and fair_autocomplete_utils.stop_talk_squad then
             fair_autocomplete_utils.stop_talk_squad(se_squad)
         end
         
-        -- Restore NPC state
         se_squad.scripted_target = nil
         se_squad.current_action = nil
         
-        -- Remove from companion squads
         if axr_companions and axr_companions.companion_squads then
             axr_companions.companion_squads[se_squad.id] = nil
         end
         
-        -- Restore spy NPC logic
         if spy_obj then
             pcall(function()
                 xr_logic.restore_scheme_and_logic(spy_obj)
@@ -1449,7 +1354,6 @@ local function post_completion_cleanup(task_id, target_functor)
             end)
         end
         
-        -- Clear companion state from server object
         local se_spy = var.spy_id and alife_object(var.spy_id)
         if se_spy then
             local sname = se_spy:name()
@@ -1460,7 +1364,6 @@ local function post_completion_cleanup(task_id, target_functor)
             end)
         end
         
-        -- Remove squad (player_id remains original so can be targeted by other tasks)
         pcall(function()
             SIMBOARD:remove_squad(se_squad)
         end)
@@ -1469,13 +1372,12 @@ local function post_completion_cleanup(task_id, target_functor)
         return
     end
     
-    -- Hostage task cleanup
+    -- hostage task cleanup
     if target_functor == "simulation_task_target" then
         local var = load_var(db.actor, task_id)
         if var and var.squad_id then
             local se_squad = alife_object(var.squad_id)
             if se_squad then
-                -- Stop talking before any squad operations (CTD prevention)
                 if fair_autocomplete_utils and fair_autocomplete_utils.stop_talk_squad then
                     fair_autocomplete_utils.stop_talk_squad(se_squad)
                 end
@@ -1485,11 +1387,8 @@ local function post_completion_cleanup(task_id, target_functor)
     end
 end
 
-------------------------------------------------------------
--- Main Loop
-------------------------------------------------------------
+-- ### MAIN LOOP
 
--- Cached config for current cycle (performance optimization)
 local _cycle_config = nil
 
 local function get_cycle_config()
@@ -1645,21 +1544,17 @@ local function do_autocompletion()
     end
 end
 
-------------------------------------------------------------
--- Initialization
-------------------------------------------------------------
+-- ### INITIALIZATION
 
 function actor_on_first_update()
     printf("[FA] actor_on_first_update - mod ready!")
     _mod_ready = true
     
-    -- Validate interval (minimum 0.5 seconds to prevent issues)
     local interval = get_mcm_config(nil, "check_interval") or 2.0
     interval = math.max(0.5, tonumber(interval) or 2.0)
     
     CreateTimeEvent("fair_autocomplete", "main_loop", interval, function()
         pcall(do_autocompletion)
-        -- Re-read interval in case it changed in MCM
         local new_interval = get_mcm_config(nil, "check_interval") or 2.0
         new_interval = math.max(0.5, tonumber(new_interval) or 2.0)
         ResetTimeEvent("fair_autocomplete", "main_loop", new_interval)
@@ -1682,21 +1577,16 @@ function load_state(m_data)
     _task_cache = {}
     _task_cache_count = 0
     _registered_tasks = m_data.fa_registered_tasks or {}
-    _recently_processed = {}  -- Clear recently processed tasks on load
-    _task_compensation_prices = {}  -- Clear compensation cache on load
-    _tasks_being_autocompleted = {}  -- Clear autocomplete tracking on load
-    -- Don't set _mod_ready = false! The mod is already initialized if we're loading
-    -- Reset module caches
+    _recently_processed = {}
+    _task_compensation_prices = {}
+    _tasks_being_autocompleted = {}
     _utils = nil
     _kill_tracker = nil
     _cycle_config = nil
     
-    -- Fix old registered tasks that don't have valid registered_time
-    -- Set them to current time so only NEW kills will count
+    -- fix old registered tasks without valid timestamp
     local current_time = os.time()
     for task_id, reg_data in pairs(_registered_tasks) do
-        -- Check if registered_time is missing, not a number, or suspiciously small (0, old conversions)
-        -- Valid os.time() values are > 1 billion (seconds since 1970)
         local rt = reg_data.registered_time
         if not rt or type(rt) ~= "number" or rt < 1000000000 then
             reg_data.registered_time = current_time
@@ -1704,10 +1594,9 @@ function load_state(m_data)
         end
     end
     
-    -- Ensure mod is ready and time event is running after load
     _mod_ready = true
     
-    -- Recreate time event in case it was lost during load
+    -- recreate time event after load
     local interval = 2.0
     if fair_autocomplete_mcm and fair_autocomplete_mcm.get_config then
         interval = fair_autocomplete_mcm.get_config(nil, "check_interval") or 2.0
@@ -1729,11 +1618,9 @@ function load_state(m_data)
     printf("[FA] load_state complete - mod ready")
 end
 
-------------------------------------------------------------
--- Monkeypatch: Stop talking before squad removal (CTD prevention)
-------------------------------------------------------------
+-- ### MONKEYPATCHES
 
--- Store original function
+-- stop talking before squad removal (CTD prevention)
 local _original_remove_squad = nil
 if sim_board and sim_board.simulation_board and sim_board.simulation_board.remove_squad then
     _original_remove_squad = sim_board.simulation_board.remove_squad
@@ -1741,26 +1628,19 @@ if sim_board and sim_board.simulation_board and sim_board.simulation_board.remov
     -- Override with safe version that stops dialog first
     sim_board.simulation_board.remove_squad = function(self, squad)
         -- Stop any ongoing dialog with squad members before removal
-        -- This prevents CTD if player is talking to a squad member
         if squad and fair_autocomplete_utils and fair_autocomplete_utils.stop_talk_squad then
             pcall(function()
                 fair_autocomplete_utils.stop_talk_squad(squad)
             end)
         end
         
-        -- Call original function
         return _original_remove_squad(self, squad)
     end
     
     printf("[FA] Monkeypatched sim_board.remove_squad for CTD prevention")
 end
 
-------------------------------------------------------------
--- Monkeypatch: Item compensation (cloned from original mod)
--- Replaces item rewards with money before task callback runs
-------------------------------------------------------------
-
--- Store original callback in GLOBAL (like original mod)
+-- item compensation (replaces items with money for autocompleted tasks)
 task_manager_task_callback = task_manager.task_callback
 task_manager.task_callback = function(tsk, stage)
     local tsk_id = tsk:get_id()
@@ -1768,30 +1648,25 @@ task_manager.task_callback = function(tsk, stage)
     printf("[FA] task_callback fired: task=%s stage=%s autocomplete_flag=%s", 
         tostring(tsk_id), tostring(stage), tostring(_tasks_being_autocompleted[tsk_id] or false))
     
-    -- Only compensate tasks that are being autocompleted by our mod
     if not _tasks_being_autocompleted[tsk_id] then
         task_manager_task_callback(tsk, stage)
         return
     end
     
-    -- Clear flag now that we've seen it (prevent memory leak)
     _tasks_being_autocompleted[tsk_id] = nil
     
-    -- Check if user wants to compensate items
     if not get_mcm_config(nil, "enable") or not get_mcm_config(nil, "compensate_item_rewards") then
         printf("[FA] task_callback: compensation disabled in MCM")
         task_manager_task_callback(tsk, stage)
         return
     end
     
-    -- Check if last stage (completed)
     if stage ~= task.completed then
         printf("[FA] task_callback: not completed stage")
         task_manager_task_callback(tsk, stage)
         return
     end
     
-    -- Get task info
     local rtask = task_manager.get_task_manager().task_info[tsk_id]
     if not rtask or not rtask.on_complete or not rtask.on_complete[1] or not rtask.on_complete[1][3] then
         printf("[FA] task_callback: no on_complete data")
@@ -1799,7 +1674,6 @@ task_manager.task_callback = function(tsk, stage)
         return
     end
     
-    -- Get task compensation prices (try to calculate if not cached)
     local compensation = _task_compensation_prices[tsk_id]
     if not compensation then
         printf("[FA] task_callback: calculating compensation for %s", tostring(tsk_id))
@@ -1814,8 +1688,6 @@ task_manager.task_callback = function(tsk, stage)
     end
     
     printf("[FA] Applying item compensation for task %s: " .. tostring(compensation.min or 0) .. "-" .. tostring(compensation.max or 0) .. " RU", tsk_id)
-    
-    -- Replace the reward table with cleaned version (items replaced with money)
     rtask.on_complete[1][3] = compensation.rewards
     
     task_manager_task_callback(tsk, stage)
