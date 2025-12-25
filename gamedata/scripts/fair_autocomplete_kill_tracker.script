@@ -227,10 +227,20 @@ function record_kill(victim, killer, is_monster)
     local is_player = is_actor(killer)
     local is_comp = is_companion(killer)
     
-    -- Only record if killed by player or companion
+    -- Check if player/companion hit first (assist credit)
+    local has_assist = was_hit_by_player_or_companion(victim_id)
+    
+    -- Only record if killed by player/companion OR if player had assist (hit first)
     if not is_player and not is_comp then
-        dbg_printf("[FA-KillTracker] Victim %s killed by non-player/companion (killer_id: %s)", victim_id, killer_id or "nil")
-        return
+        if has_assist then
+            -- Player/companion hit first but something else got the kill (anomaly, other NPC)
+            -- Give credit to player for the assist
+            dbg_printf("[FA-KillTracker] Victim %s killed by other (killer_id: %s), but player had ASSIST - crediting player", victim_id, killer_id or "nil")
+            is_player = true  -- Credit as player kill since they hit first
+        else
+            dbg_printf("[FA-KillTracker] Victim %s killed by non-player/companion (killer_id: %s)", victim_id, killer_id or "nil")
+            return
+        end
     end
     
     local smart_terrain = get_object_smart_terrain(victim)
