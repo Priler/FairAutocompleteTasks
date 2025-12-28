@@ -3,6 +3,7 @@
 local defaults = {
     -- General settings
     ["enable"] = true,
+    ["enable_autocomplete"] = true,
     ["pda_check"] = true,
     ["require_player_kill"] = true,
     ["companion_kills_count"] = true,
@@ -73,6 +74,8 @@ function on_mcm_load()
             -- General Settings
             { id = "enable", type = "check", val = 1, def = true,
               hint = "fair_autocomplete_enable" },
+            { id = "enable_autocomplete", type = "check", val = 1, def = true,
+              hint = "fair_autocomplete_enable_autocomplete" },
             { id = "pda_check", type = "check", val = 1, def = true,
               hint = "fair_autocomplete_pda_check" },
             { id = "divider_1", type = "line" },

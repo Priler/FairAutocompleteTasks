@@ -11,6 +11,7 @@ local function get_mcm_config(category, key)
     end
     local defaults = {
         enable = true,
+        enable_autocomplete = true,
         pda_check = true,
         require_player_kill = true,
         companion_kills_count = true,
@@ -1395,6 +1396,7 @@ local function get_cycle_config()
     if not _cycle_config then
         _cycle_config = {
             enable = get_mcm_config(nil, "enable"),
+            enable_autocomplete = get_mcm_config(nil, "enable_autocomplete"),
             pda_check = get_mcm_config(nil, "pda_check"),
             debug = get_mcm_config(nil, "debug"),
             require_player_kill = get_mcm_config(nil, "require_player_kill"),
@@ -1452,16 +1454,18 @@ local function do_autocompletion()
                     end
                     
                     if should then
-                        -- Get target_functor for cleanup
-                        local target_functor = nil
-                        if _task_cache[task_id] then
-                            target_functor = _task_cache[task_id].target_functor
+                        -- only autocomplete if enabled
+                        if cfg.enable_autocomplete then
+                            local target_functor = nil
+                            if _task_cache[task_id] then
+                                target_functor = _task_cache[task_id].target_functor
+                            end
+                            table.insert(tasks_to_complete, {
+                                id = task_id,
+                                giver_id = task_info.task_giver_id,
+                                target_functor = target_functor
+                            })
                         end
-                        table.insert(tasks_to_complete, {
-                            id = task_id,
-                            giver_id = task_info.task_giver_id,
-                            target_functor = target_functor
-                        })
                     elseif reason and (reason:find("no_kills") or reason:find("not_player_kill")) then
                         printf("[FA] Adding to cancel list: " .. tostring(task_id) .. " reason=" .. tostring(reason))
                         table.insert(tasks_to_cancel, {

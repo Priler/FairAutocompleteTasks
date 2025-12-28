@@ -12,10 +12,17 @@
     
     <!-- General Settings -->
     <string id="ui_mcm_fair_autocomplete_enable">
-        <text>Enable Autocomplete</text>
+        <text>Enable Mod</text>
     </string>
     <string id="ui_mcm_fair_autocomplete_enable_desc">
-        <text>Enables the main autocomplete logic. Tasks will only autocomplete if YOU killed the targets.</text>
+        <text>Enable kill tracking and task monitoring. When disabled, the mod does nothing.</text>
+    </string>
+    
+    <string id="ui_mcm_fair_autocomplete_enable_autocomplete">
+        <text>Enable Autocomplete</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_enable_autocomplete_desc">
+        <text>Automatically complete tasks when you killed the targets. If disabled, you need to visit the task giver manually, but stolen task detection still works.</text>
     </string>
     
     <string id="ui_mcm_fair_autocomplete_pda_check">

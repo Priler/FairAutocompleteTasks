@@ -12,10 +12,17 @@
     
     <!-- General Settings -->
     <string id="ui_mcm_fair_autocomplete_enable">
-        <text>Включить автозавершение</text>
+        <text>Включить мод</text>
     </string>
     <string id="ui_mcm_fair_autocomplete_enable_desc">
-        <text>Включает основную логику автозавершения. Задания будут завершаться только если ВЫ убили цели.</text>
+        <text>Включает отслеживание убийств и мониторинг заданий. При отключении мод ничего не делает.</text>
+    </string>
+    
+    <string id="ui_mcm_fair_autocomplete_enable_autocomplete">
+        <text>Включить автозавершение</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_enable_autocomplete_desc">
+        <text>Автоматически завершать задания когда вы убили цели. При отключении нужно идти к заказчику, но украденные задания всё равно отменяются.</text>
     </string>
     
     <string id="ui_mcm_fair_autocomplete_pda_check">
