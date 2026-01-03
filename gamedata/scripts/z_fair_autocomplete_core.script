@@ -149,7 +149,11 @@ local TASK_FUNCTOR_MAP = {
 
 -- task IDs that should be treated as a certain type (overrides functor detection)
 local TASK_ID_OVERRIDES = {
-    ["bar_dolg_general_petrenko_stalker_task_rioc_pol"] = { key = "fate", type = "fate" },
+}
+
+-- task ID prefixes that should be treated as a certain type
+local TASK_PREFIX_OVERRIDES = {
+    ["bar_dolg_general_petrenko_stalker_task_rioc_"] = { key = "fate", type = "fate" },
 }
 
 -- tasks that start with these prefixes are mutant hunts
@@ -164,6 +168,17 @@ local KILL_VALIDATION_TYPES = {
     ["defense"] = true,
 }
 
+-- check if task matches any prefix override
+local function get_prefix_override(task_id)
+    if not task_id then return nil end
+    for prefix, override in pairs(TASK_PREFIX_OVERRIDES) do
+        if task_id:sub(1, #prefix) == prefix then
+            return override
+        end
+    end
+    return nil
+end
+
 -- ### HELPER FUNCTIONS
 
 local function is_task_type_enabled(target_functor, task_id)
@@ -171,6 +186,12 @@ local function is_task_type_enabled(target_functor, task_id)
     if task_id and TASK_ID_OVERRIDES[task_id] then
         local override = TASK_ID_OVERRIDES[task_id]
         return get_mcm_config(nil, override.key)
+    end
+    
+    -- check prefix overrides
+    local prefix_override = get_prefix_override(task_id)
+    if prefix_override then
+        return get_mcm_config(nil, prefix_override.key)
     end
     
     local info = TASK_FUNCTOR_MAP[target_functor]
@@ -182,6 +203,12 @@ local function get_task_type(target_functor, task_id)
     -- check task ID overrides first
     if task_id and TASK_ID_OVERRIDES[task_id] then
         return TASK_ID_OVERRIDES[task_id].type
+    end
+    
+    -- check prefix overrides
+    local prefix_override = get_prefix_override(task_id)
+    if prefix_override then
+        return prefix_override.type
     end
     
     -- check if task_id matches mutant hunt prefixes
