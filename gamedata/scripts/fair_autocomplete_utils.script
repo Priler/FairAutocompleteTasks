@@ -1,6 +1,12 @@
 -- Fair Autocomplete - Utility Functions
 
-local ini_trade = ini_file([[items\trade\trade_generic.ltx]])
+local ini_trade = nil
+local function get_ini_trade()
+    if not ini_trade then
+        ini_trade = ini_file([[items\trade\trade_generic.ltx]])
+    end
+    return ini_trade
+end
 
 -- ### DEBUG
 
@@ -42,19 +48,21 @@ end
 -- ### ITEM PRICE CALCULATION
 
 function get_generic_sell_discount()
-    local condlist = ini_trade:r_string_to_condlist("trader", "discounts")
+    local trade = get_ini_trade()
+    local condlist = trade:r_string_to_condlist("trader", "discounts")
     local sec = (condlist) and (xr_logic.pick_section_from_condlist(db.actor, nil, condlist))
     if (not sec) or (sec == "") then
         return 1
     end
 
-    local factor = ini_trade:r_float_ex(sec, "sell") or 1
+    local factor = trade:r_float_ex(sec, "sell") or 1
     local eco_factor = game_difficulties.get_eco_factor("sell") or 1
     
     return factor * eco_factor
 end
 
 function get_base_cost(itm)
+    if not itm then return 0 end
     local sec, amount = string.match(itm, "(.*)__([1-9])")
     if not sec then
         return ini_sys:r_float(itm, "cost") or 0

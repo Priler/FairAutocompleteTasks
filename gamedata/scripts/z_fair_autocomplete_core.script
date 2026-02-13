@@ -106,7 +106,8 @@ end
 
 -- cleanup old task cache entries
 local function cleanup_task_cache()
-    if _task_cache_count > 200 then
+    -- soft eviction: only wipe if significantly oversized
+    if _task_cache_count > 500 then
         _task_cache = {}
         _task_cache_count = 0
     end
@@ -405,7 +406,7 @@ local function cache_compensation_prices(task_id)
     if tm_info.on_complete and tm_info.on_complete[1] and tm_info.on_complete[1][3] then
         _task_compensation_prices[task_id] = calculate_task_compensation(tm_info.on_complete[1][3])
         if _task_compensation_prices[task_id] then
-            printf("[FA] Cached compensation for task %s: %d-%d RU", task_id, 
+            printf("[FA] Cached compensation for task %s: %s-%s RU", task_id, 
                 _task_compensation_prices[task_id].min or 0, 
                 _task_compensation_prices[task_id].max or 0)
         end
@@ -450,10 +451,11 @@ local function register_task(task_id)
     
     if task_type == "bounty" then
         if axr_task_manager and axr_task_manager.bounties_by_id then
-            reg_data.target_id = axr_task_manager.bounties_by_id[task_id]
+            local raw_id = axr_task_manager.bounties_by_id[task_id]
+            reg_data.target_id = tonumber(raw_id) or raw_id
         end
         if not reg_data.target_id and var then
-            reg_data.target_id = var.target_id
+            reg_data.target_id = tonumber(var.target_id) or var.target_id
         end
     elseif task_type == "assault" or task_type == "defense" then
         if var and var.smart_id then
@@ -466,7 +468,7 @@ local function register_task(task_id)
         -- mutant hunts can have either a specific target or a location
         if var then
             if var.target_id then
-                reg_data.target_id = var.target_id
+                reg_data.target_id = tonumber(var.target_id) or var.target_id
                 local se_obj = alife_object(var.target_id)
                 if se_obj then
                     reg_data.mutant_section = se_obj:section_name()
@@ -480,7 +482,7 @@ local function register_task(task_id)
                     if squad.player_id then
                         if is_squad_monster and is_squad_monster[squad.player_id] then
                             reg_data.mutant_section = squad.player_id
-                            printf("[FA] Got mutant section from squad.player_id: " .. tostring(squad.player_id))
+                            printf("[FA] Got mutant section from squad.player_id: %s", tostring(squad.player_id))
                         end
                     end
                     
@@ -497,7 +499,7 @@ local function register_task(task_id)
                                     else
                                         reg_data.mutant_section = sec
                                     end
-                                    printf("[FA] Got mutant section from squad member: " .. tostring(reg_data.mutant_section))
+                                    printf("[FA] Got mutant section from squad member: %s", tostring(reg_data.mutant_section))
                                     break
                                 end
                             end
@@ -536,7 +538,7 @@ local function register_task(task_id)
                 for k, v in pairs(var) do
                     table.insert(var_keys, tostring(k) .. "=" .. tostring(v))
                 end
-                printf("[FA] mutant_hunt var dump for " .. task_id .. ": " .. table.concat(var_keys, ", "))
+                printf("[FA] mutant_hunt var dump for %s: %s", task_id, table.concat(var_keys, ", "))
             end
         end
         
@@ -549,7 +551,7 @@ local function register_task(task_id)
             end
         end
         
-        printf("[FA] Registered mutant_hunt task: " .. task_id .. " section=" .. tostring(reg_data.mutant_section) .. " smart=" .. tostring(reg_data.smart_terrain))
+        printf("[FA] Registered mutant_hunt task: %s section=%s smart=%s", task_id, tostring(reg_data.mutant_section), tostring(reg_data.smart_terrain))
     end
     
     _registered_tasks[task_id] = reg_data
@@ -557,6 +559,13 @@ end
 
 local function unregister_task(task_id)
     _registered_tasks[task_id] = nil
+    _task_compensation_prices[task_id] = nil
+    
+    -- evict from task cache to keep memory bounded
+    if _task_cache[task_id] then
+        _task_cache[task_id] = nil
+        _task_cache_count = math.max(0, _task_cache_count - 1)
+    end
 end
 
 -- ### KILL VALIDATION
@@ -578,7 +587,7 @@ local function get_task_registered_time(reg)
     end
     
     reg.registered_time = os.time()
-    printf("[FA] Fixed invalid registered_time, new value: " .. tostring(reg.registered_time))
+    printf("[FA] Fixed invalid registered_time, new value: %s", tostring(reg.registered_time))
     return reg.registered_time
 end
 
@@ -587,6 +596,7 @@ local SECTION_TO_MONSTER_TYPE = {
     ["boar"] = "monster_vegetarian",
     ["flesh"] = "monster_vegetarian",
     ["tushkano"] = "monster_vegetarian",
+    ["tushkanchik"] = "monster_vegetarian",
     ["rat"] = "monster_vegetarian",
     
     ["dog"] = "monster_predatory",
@@ -599,6 +609,7 @@ local SECTION_TO_MONSTER_TYPE = {
     ["zombie"] = "monster_zombied",
     ["snork"] = "monster_zombied",
     ["fracture"] = "monster_zombied",
+    ["zombied"] = "monster_zombied",
     
     ["bloodsucker"] = "monster_special",
     ["controller"] = "monster_special",
@@ -607,14 +618,23 @@ local SECTION_TO_MONSTER_TYPE = {
     ["pseudogiant"] = "monster_special",
     ["karlik"] = "monster_special",
     ["psysucker"] = "monster_special",
+    ["gigant"] = "monster_special",
 }
 
 -- infer monster type from section name
 local function infer_monster_type_from_section(section)
     if not section then return nil end
     
+    -- first try: section starts with monster type
     for prefix, monster_type in pairs(SECTION_TO_MONSTER_TYPE) do
         if string.find(section, prefix, 1, true) == 1 then
+            return monster_type
+        end
+    end
+    
+    -- second try: section contains monster type (for sections like "labx16_zombie_12", "gar_dog_5")
+    for prefix, monster_type in pairs(SECTION_TO_MONSTER_TYPE) do
+        if string.find(section, "_" .. prefix, 1, true) then
             return monster_type
         end
     end
@@ -678,9 +698,6 @@ local function section_matches(kill_section, required_section, monster_type)
     -- partial match: kill_section starts with required_section
     if string.find(kill_section, required_section, 1, true) == 1 then return true end
     
-    -- check if required_section is more specific
-    if string.find(required_section, kill_section, 1, true) == 1 then return true end
-    
     return false
 end
 
@@ -689,16 +706,21 @@ local function validate_bounty_kill(task_id)
     
     local reg = _registered_tasks[task_id]
     if reg and reg.target_id then
-        target_id = reg.target_id
+        target_id = tonumber(reg.target_id) or reg.target_id
     end
     
     if not target_id then
         if axr_task_manager and axr_task_manager.bounties_by_id then
             target_id = axr_task_manager.bounties_by_id[task_id]
+            if target_id then
+                target_id = tonumber(target_id) or target_id
+            end
         end
         if not target_id then
             local var = load_var(db.actor, task_id)
-            if var then target_id = var.target_id end
+            if var then
+                target_id = tonumber(var.target_id) or var.target_id
+            end
         end
     end
     
@@ -706,13 +728,61 @@ local function validate_bounty_kill(task_id)
         return false, "no_target"
     end
     
+    printf("[FA] validate_bounty: task=%s target_id=%s (type=%s)", 
+        tostring(task_id), tostring(target_id), type(target_id))
+    
     local tracker = get_kill_tracker()
-    if tracker and tracker.was_killed_by_player_or_companion then
-        local killed = tracker.was_killed_by_player_or_companion(target_id)
-        return killed, killed and "player_kill" or "not_player_kill"
+    if not tracker then
+        return false, "no_tracker"
     end
     
-    return false, "no_tracker"
+    -- primary check: direct target kill
+    if tracker.was_killed_by_player_or_companion then
+        local killed = tracker.was_killed_by_player_or_companion(target_id)
+        if killed then
+            return true, "player_kill"
+        end
+    end
+    
+    -- fallback: target might be a squad ID, check if any squad member was killed
+    if tracker.was_squad_member_killed_by_player then
+        local squad_killed, member_id = tracker.was_squad_member_killed_by_player(target_id)
+        if squad_killed then
+            printf("[FA] validate_bounty: squad member %s killed for target %s", tostring(member_id), tostring(target_id))
+            return true, "squad_member_kill"
+        end
+    end
+    
+    -- fallback: check if target is dead and player killed someone nearby recently
+    -- this handles cases where the target_id doesn't match the kill record key
+    if tracker.is_target_dead and tracker.is_target_dead(target_id) then
+        local var = load_var(db.actor, task_id)
+        if var then
+            local squad_id = var.squad_id
+            if squad_id and tracker.was_squad_member_killed_by_player then
+                local squad_killed, member_id = tracker.was_squad_member_killed_by_player(tonumber(squad_id) or squad_id)
+                if squad_killed then
+                    printf("[FA] validate_bounty: target dead + squad member %s killed", tostring(member_id))
+                    return true, "target_dead_squad_kill"
+                end
+            end
+        end
+    end
+    
+    -- time-correlation fallback: if the player killed anyone in the last few seconds,
+    -- the game probably used a different ID than what we tracked.
+    -- the fact that this bounty task is being evaluated means the game considers
+    -- the target state changed - tight time window prevents false positives.
+    if tracker.get_most_recent_player_kill then
+        local recent_kill, recent_victim_id = tracker.get_most_recent_player_kill(8)
+        if recent_kill and not recent_kill.is_monster then
+            printf("[FA] validate_bounty: player killed NPC %s %ss ago -> time-correlation PASS",
+                tostring(recent_victim_id), tostring(os.time() - recent_kill.time))
+            return true, "time_correlation"
+        end
+    end
+    
+    return false, "not_player_kill"
 end
 
 local function validate_assault_kill(task_id)
@@ -779,7 +849,8 @@ local function validate_assault_kill(task_id)
         return false, "no_smart_terrain"
     end
     
-    printf("[FA] validate_assault: task=" .. tostring(task_id) .. " smart_terrain=" .. tostring(smart_name) .. " smart_id=" .. tostring(smart_id) .. " has_position=" .. tostring(smart_position ~= nil))
+    printf("[FA] validate_assault: task=%s smart_terrain=%s smart_id=%s has_position=%s", 
+        tostring(task_id), tostring(smart_name), tostring(smart_id), tostring(smart_position ~= nil))
     
     local task_registered_time = get_task_registered_time(reg)
     
@@ -809,9 +880,9 @@ local function validate_assault_kill(task_id)
                         local dist = smart_position:distance_to(kill_vec)
                         if dist < 150 then
                             nearby_match = true
-                            printf("[FA] validate_assault: kill within " .. string.format("%.1f", dist) .. "m of smart terrain")
+                            printf("[FA] validate_assault: kill within %.1fm of smart terrain", dist)
                         else
-                            printf("[FA] validate_assault: kill too far - " .. string.format("%.1f", dist) .. "m from smart terrain")
+                            printf("[FA] validate_assault: kill too far - %.1fm from smart terrain", dist)
                         end
                     end
                 end
@@ -825,7 +896,8 @@ local function validate_assault_kill(task_id)
                         if nearby_match then
                             player_kills_nearby = player_kills_nearby + 1
                         end
-                        printf("[FA] validate_assault: matched kill - section=" .. tostring(kill_data.section) .. " is_monster=" .. tostring(kill_data.is_monster) .. " location_match=" .. tostring(location_match) .. " nearby_match=" .. tostring(nearby_match))
+                        printf("[FA] validate_assault: matched kill - section=%s is_monster=%s location_match=%s nearby_match=%s", 
+                            tostring(kill_data.section), tostring(kill_data.is_monster), tostring(location_match), tostring(nearby_match))
                     end
                 end
             end
@@ -834,12 +906,13 @@ local function validate_assault_kill(task_id)
         -- use the better count
         local player_kills = math.max(player_kills_at_location, player_kills_nearby)
         
-        printf("[FA] validate_assault: player_kills=" .. tostring(player_kills) .. " (at_location=" .. tostring(player_kills_at_location) .. " nearby=" .. tostring(player_kills_nearby) .. ") total=" .. tostring(total_kills_at_location) .. " at " .. tostring(smart_name))
+        printf("[FA] validate_assault: player_kills=%s (at_location=%s nearby=%s) total=%s at %s", 
+            tostring(player_kills), tostring(player_kills_at_location), tostring(player_kills_nearby), tostring(total_kills_at_location), tostring(smart_name))
         
         -- check against kill requirement (1=one, 2=half, 3=all)
         local kill_req = tonumber(get_mcm_config(nil, "kill_requirement")) or 1
         
-        printf("[FA] validate_assault: kill_req=" .. tostring(kill_req) .. " player_kills=" .. tostring(player_kills))
+        printf("[FA] validate_assault: kill_req=%s player_kills=%s", tostring(kill_req), tostring(player_kills))
         
         if player_kills > 0 then
             if kill_req == 1 then
@@ -923,24 +996,39 @@ local function validate_defense_kill(task_id)
 end
 
 local function validate_mutant_hunt_kill(task_id)
-    local smart_name = nil
-    local smart_position = nil
-    local target_id = nil
-    local required_section = nil
-    
-    local reg = _registered_tasks[task_id]
-    if reg then
-        smart_name = reg.smart_terrain
-        target_id = reg.target_id
-        required_section = reg.mutant_section
+    local tracker = get_kill_tracker()
+    if not tracker or not tracker._player_kills then
+        return false, "no_tracker"
     end
     
-    -- try multiple methods to get smart terrain and target
-    if not smart_name or not target_id then
-        local var = load_var(db.actor, task_id)
-        if var then
-            if not smart_name and var.smart_id then
-                local smart_obj = alife_object(var.smart_id)
+    local reg = _registered_tasks[task_id]
+    local target_id = reg and reg.target_id
+    local smart_name = reg and reg.smart_terrain
+    local smart_position = nil
+    
+    -- try to get target_id and location from task var
+    local var = load_var(db.actor, task_id)
+    if var then
+        if not target_id and var.target_id then
+            target_id = var.target_id
+        end
+        
+        -- get smart terrain
+        if not smart_name and var.smart_id then
+            local smart_obj = alife_object(var.smart_id)
+            if smart_obj then
+                smart_name = smart_obj:name()
+                if smart_obj.position then
+                    smart_position = smart_obj.position
+                end
+            end
+        end
+        
+        if not smart_name and var.smart then
+            if type(var.smart) == "string" then
+                smart_name = var.smart
+            elseif type(var.smart) == "number" then
+                local smart_obj = alife_object(var.smart)
                 if smart_obj then
                     smart_name = smart_obj:name()
                     if smart_obj.position then
@@ -948,223 +1036,101 @@ local function validate_mutant_hunt_kill(task_id)
                     end
                 end
             end
-            
-            -- smart string name (used by Hunter tasks)
-            if not smart_name and var.smart then
-                if type(var.smart) == "string" then
-                    smart_name = var.smart
-                    if SIMBOARD and SIMBOARD.smarts_by_names and SIMBOARD.smarts_by_names[var.smart] then
-                        local smart = SIMBOARD.smarts_by_names[var.smart]
-                        if smart and smart.position then
-                            smart_position = smart.position
-                        end
-                    end
-                elseif type(var.smart) == "number" then
-                    local smart_obj = alife_object(var.smart)
-                    if smart_obj then
-                        smart_name = smart_obj:name()
-                        if smart_obj.position then
-                            smart_position = smart_obj.position
-                        end
-                    end
-                end
-            end
-            
-            if not smart_name and var.target_smart then
-                smart_name = var.target_smart
-            end
-            
-            if not target_id and var.target_id then
-                target_id = var.target_id
-            end
-            
-            -- try to get mutant section from var
-            if not required_section then
-                if var.mutant_type then
-                    required_section = var.mutant_type
-                elseif var.monster_type then
-                    required_section = var.monster_type
-                elseif var.section then
-                    required_section = var.section
-                end
-            end
-            
-            -- get monster type from squad.player_id
-            if not required_section and var.squad_id then
-                local squad = alife_object(var.squad_id)
-                if squad then
-                    if squad.player_id and is_squad_monster and is_squad_monster[squad.player_id] then
-                        required_section = squad.player_id
-                        printf("[FA] Got mutant section from squad.player_id: " .. tostring(squad.player_id))
-                    end
-                    
-                    -- fallback: get from first squad member
-                    if not required_section and squad.squad_members then
-                        for member in squad:squad_members() do
-                            local se_member = member.object or (member.id and alife_object(member.id))
-                            if se_member then
-                                local sec = se_member:section_name()
-                                if sec then
-                                    local base_type = string.match(sec, "^([^_]+)")
-                                    if base_type and is_squad_monster and is_squad_monster[base_type] then
-                                        required_section = base_type
-                                    else
-                                        required_section = sec
-                                    end
-                                    printf("[FA] Got mutant section from squad member: " .. tostring(required_section))
-                                    break
-                                end
-                            end
-                        end
-                    end
-                    
-                    if required_section and reg then
-                        reg.mutant_section = required_section
-                    end
-                end
-            end
+        end
+        
+        if not smart_name and var.target_smart then
+            smart_name = var.target_smart
         end
     end
     
-    -- try to get position if we have smart_name
+    -- try to get position from SIMBOARD
     if smart_name and not smart_position then
         if SIMBOARD and SIMBOARD.smarts_by_names and SIMBOARD.smarts_by_names[smart_name] then
             local smart = SIMBOARD.smarts_by_names[smart_name]
-            if smart and smart.position then
-                smart_position = smart.position
+            if smart and smart.smrt and smart.smrt.position then
+                smart_position = smart.smrt.position
             end
         end
     end
     
-    local tracker = get_kill_tracker()
-    if not tracker or not tracker._player_kills then
-        return false, "no_tracker"
-    end
-    
-    local task_registered_time = get_task_registered_time(reg)
-    
-    -- Debug logging
-    printf("[FA] validate_mutant_hunt: task=" .. tostring(task_id) .. ", section=" .. tostring(required_section) .. ", smart=" .. tostring(smart_name) .. ", target_id=" .. tostring(target_id) .. ", reg_time=" .. tostring(task_registered_time))
-    
-    -- Method A: If we have a specific target_id, check if that exact mutant was killed (like bounty)
+    -- Method A: specific target (bounty-style mutant task)
     if target_id then
         if tracker.was_killed_by_player_or_companion then
             local killed = tracker.was_killed_by_player_or_companion(target_id)
             if killed then
+                printf("[FA] validate_mutant_hunt: specific target %s killed by player -> PASS", tostring(target_id))
                 return true, "target_killed"
             end
         end
-        -- Target exists but wasn't killed by player
         return false, "target_not_player_kill"
     end
     
-    -- If we don't know section AND location, we can't validate at all
-    if not required_section and not smart_name and not smart_position then
-        printf("[FA] validate_mutant_hunt: can't validate - unknown section AND location")
-        return false, "unknown_section_and_location"
-    end
+    printf("[FA] validate_mutant_hunt: task=%s, smart=%s, has_position=%s", 
+        tostring(task_id), tostring(smart_name), tostring(smart_position ~= nil))
     
-    -- Determine matching mode:
-    -- strict = require section match (when we know section)
-    -- loose = any monster (backward compat for old tasks without section)
-    local strict_section = (required_section ~= nil)
-    if not strict_section then
-        printf("[FA] validate_mutant_hunt: using loose matching (old task without section info)")
-    end
-    
-    -- Method B: Location-based validation (exact smart terrain match)
+    -- Method B: location-based check with recent time window
+    -- check if player killed ANY monster at location in last 5 minutes
+    local current_time = os.time()
+    local recent_window = 300  -- 5 minutes
     local kills_at_location = 0
     local kills_nearby = 0
     
-    -- Debug: count all kills in tracker
-    local total_in_tracker = 0
-    local player_monster_kills = 0
-    local npc_monster_kills = 0
-    for vid, kd in pairs(tracker._player_kills) do
-        total_in_tracker = total_in_tracker + 1
-        if kd.is_monster then
-            if kd.is_player_kill or kd.is_companion_kill then
-                player_monster_kills = player_monster_kills + 1
-            else
-                npc_monster_kills = npc_monster_kills + 1
-            end
-        end
-    end
-    printf("[FA] Kill tracker stats: total=" .. total_in_tracker .. " player_monsters=" .. player_monster_kills .. " npc_monsters=" .. npc_monster_kills)
-    
     for victim_id, kill_data in pairs(tracker._player_kills) do
-        if (kill_data.is_player_kill or kill_data.is_companion_kill) and kill_data.is_monster then
-            -- Check if section matches (if strict mode - we know required section)
-            local section_ok = true
-            if strict_section then
-                section_ok = section_matches(kill_data.section, required_section, kill_data.monster_type)
-                if not section_ok and get_mcm_config(nil, "debug") then
-                    printf("[FA] validate_mutant_hunt: skipping kill section=" .. tostring(kill_data.section) .. " monster_type=" .. tostring(kill_data.monster_type) .. " (required=" .. tostring(required_section) .. ")")
-                end
-            end
+        if kill_data.is_monster and (kill_data.is_player_kill or kill_data.is_companion_kill) then
+            local kill_time = get_time_as_number(kill_data.time)
+            local time_diff = current_time - kill_time
             
-            if section_ok then
-                -- Only count kills that happened AFTER task was registered
-                local kill_time = get_time_as_number(kill_data.time)
-                if kill_time >= task_registered_time then
-                    -- Exact location match
-                    if smart_name and kill_data.location == smart_name then
-                        kills_at_location = kills_at_location + 1
-                        printf("[FA] validate_mutant_hunt: matched kill at location, section=" .. tostring(kill_data.section) .. " monster_type=" .. tostring(kill_data.monster_type))
-                    end
-                    -- Position-based match (within 150m of task smart terrain)
-                    if smart_position and kill_data.position then
-                        -- Convert stored position table {x,y,z} to vector for distance calc
-                        local kill_pos = kill_data.position
-                        if type(kill_pos) == "table" and kill_pos.x then
-                            local kill_vec = vector():set(kill_pos.x, kill_pos.y, kill_pos.z)
-                            local dist = smart_position:distance_to(kill_vec)
-                            if dist < 150 then
-                                kills_nearby = kills_nearby + 1
-                                printf("[FA] validate_mutant_hunt: matched kill at dist=" .. string.format("%.1f", dist) .. " section=" .. tostring(kill_data.section))
-                            end
+            if time_diff <= recent_window then
+                -- exact location match
+                if smart_name and kill_data.location == smart_name then
+                    kills_at_location = kills_at_location + 1
+                end
+                
+                -- position-based match (within 150m)
+                if smart_position and kill_data.position then
+                    local kill_pos = kill_data.position
+                    if type(kill_pos) == "table" and kill_pos.x then
+                        local kill_vec = vector():set(kill_pos.x, kill_pos.y, kill_pos.z)
+                        local dist = smart_position:distance_to(kill_vec)
+                        if dist < 150 then
+                            kills_nearby = kills_nearby + 1
                         end
                     end
-                else
-                    printf("[FA] validate_mutant_hunt: skipping old kill (kill_time=" .. tostring(kill_time) .. " < reg_time=" .. tostring(task_registered_time) .. ")")
                 end
             end
         end
     end
     
+    printf("[FA] validate_mutant_hunt: kills_at_location=%s, kills_nearby=%s (window=%ss)", 
+        tostring(kills_at_location), tostring(kills_nearby), tostring(recent_window))
+    
     if kills_at_location > 0 then
-        printf("[FA] validate_mutant_hunt RESULT: kills_at_location=" .. tostring(kills_at_location) .. " -> PASS")
         return true, "kills_at_location"
     end
     
     if kills_nearby > 0 then
-        printf("[FA] validate_mutant_hunt RESULT: kills_nearby=" .. tostring(kills_nearby) .. " -> PASS")
         return true, "kills_nearby"
     end
     
-    -- Method C: No location info - check if player killed the right type of monster recently (after task registration)
-    -- This is a fallback for tasks where we can't determine location
+    -- Method C: fallback if we don't have location - any recent monster kill
     if not smart_name and not smart_position then
-        local matching_monster_kills = 0
+        local recent_monster_kills = 0
         for victim_id, kill_data in pairs(tracker._player_kills) do
-            if (kill_data.is_player_kill or kill_data.is_companion_kill) and kill_data.is_monster then
+            if kill_data.is_monster and (kill_data.is_player_kill or kill_data.is_companion_kill) then
                 local kill_time = get_time_as_number(kill_data.time)
-                if kill_time >= task_registered_time then
-                    -- Must also match section if we know what type of monster is required
-                    if section_matches(kill_data.section, required_section, kill_data.monster_type) then
-                        matching_monster_kills = matching_monster_kills + 1
-                    end
+                local time_diff = current_time - kill_time
+                if time_diff <= recent_window then
+                    recent_monster_kills = recent_monster_kills + 1
                 end
             end
         end
         
-        if matching_monster_kills > 0 then
-            printf("[FA] validate_mutant_hunt RESULT: matching_monster_kills=" .. tostring(matching_monster_kills) .. " (required=" .. tostring(required_section) .. ") -> PASS (fallback)")
-            return true, "monster_kills_no_location"
+        if recent_monster_kills > 0 then
+            printf("[FA] validate_mutant_hunt: no location info, but %s recent monster kills -> PASS (fallback)", tostring(recent_monster_kills))
+            return true, "recent_monster_kills_no_location"
         end
     end
     
-    printf("[FA] validate_mutant_hunt RESULT: no player kills -> FAIL")
     return false, "no_kills_at_location"
 end
 
@@ -1222,13 +1188,13 @@ local function should_autocomplete(task_id, task_info)
     end
     
     -- Check MCM blacklist (never autocomplete)
-    local blacklist = get_mcm_config(nil, "blacklist")
+    local blacklist = (_cycle_config and _cycle_config.blacklist) or get_mcm_config(nil, "blacklist")
     if is_in_list(blacklist, task_id) then
         return false, "user_blacklisted"
     end
     
     -- Check if whitelisted (will bypass type check and kill validation, but NOT stage check)
-    local whitelist = get_mcm_config(nil, "whitelist")
+    local whitelist = (_cycle_config and _cycle_config.whitelist) or get_mcm_config(nil, "whitelist")
     local is_whitelisted = is_in_list(whitelist, task_id)
     local whitelist_stage_override = get_whitelist_stage_override(whitelist, task_id)
     
@@ -1262,23 +1228,6 @@ local function should_autocomplete(task_id, task_info)
         end
     end
     
-    -- Reward stage detection via functor (more reliable than just stage number)
-    -- If the target functor returns the task_giver_id, we're at reward stage
-    if task_functor and target_functor then
-        local functor_func = task_functor[target_functor]
-        if functor_func then
-            local success, target = pcall(function()
-                return functor_func(task_id, "target", "", task_info)
-            end)
-            if success and target and type(target) == "number" then
-                if target == task_info.task_giver_id then
-                    -- We're at reward stage - ready to autocomplete (if other checks pass)
-                    -- This is more reliable than stage number comparison
-                end
-            end
-        end
-    end
-    
     local stage_complete = tonumber(tsk.stage_complete)
     if not stage_complete then return false, "no_complete_stage" end
     
@@ -1295,7 +1244,7 @@ local function should_autocomplete(task_id, task_info)
     -- Whitelist stage override (e.g. "task_id:0" to complete at stage 0)
     if is_whitelisted and whitelist_stage_override then
         normalized_stage_complete = whitelist_stage_override
-        printf("[FA] Using whitelist stage override for %s: %d", task_id, whitelist_stage_override)
+        printf("[FA] Using whitelist stage override for %s: %s", task_id, tostring(whitelist_stage_override))
     end
     
     if current_stage ~= normalized_stage_complete then
@@ -1309,7 +1258,7 @@ local function should_autocomplete(task_id, task_info)
     
     if get_mcm_config(nil, "require_player_kill") then
         local task_type = get_task_type(target_functor, task_id)
-        printf("[FA] Task " .. tostring(task_id) .. " type=" .. tostring(task_type) .. " require_player_kill=true")
+        printf("[FA] Task %s type=%s require_player_kill=true", tostring(task_id), tostring(task_type))
         
         if KILL_VALIDATION_TYPES[task_type] then
             if task_type == "bounty" then
@@ -1330,10 +1279,10 @@ local function should_autocomplete(task_id, task_info)
                 if not valid then return false, "mutant_" .. reason end
             end
         else
-            printf("[FA] Task type " .. tostring(task_type) .. " not in KILL_VALIDATION_TYPES")
+            printf("[FA] Task type %s not in KILL_VALIDATION_TYPES", tostring(task_type))
         end
     else
-        printf("[FA] Task " .. tostring(task_id) .. " - require_player_kill is DISABLED")
+        printf("[FA] Task %s - require_player_kill is DISABLED", tostring(task_id))
     end
     
     return true, "passed"
@@ -1430,6 +1379,8 @@ local function get_cycle_config()
             cancel_if_stolen = get_mcm_config(nil, "cancel_if_stolen"),
             compensate_item_rewards = get_mcm_config(nil, "compensate_item_rewards"),
             kill_requirement = get_mcm_config(nil, "kill_requirement") or 1,
+            whitelist = get_mcm_config(nil, "whitelist"),
+            blacklist = get_mcm_config(nil, "blacklist"),
         }
     end
     return _cycle_config
@@ -1493,8 +1444,8 @@ local function do_autocompletion()
                                 target_functor = target_functor
                             })
                         end
-                    elseif reason and (reason:find("no_kills") or reason:find("not_player_kill")) then
-                        printf("[FA] Adding to cancel list: " .. tostring(task_id) .. " reason=" .. tostring(reason))
+                    elseif reason and (reason:find("no_kills") or reason:find("not_player_kill") or reason:find("no_recent")) then
+                        printf("[FA] Adding to cancel list: %s reason=%s", tostring(task_id), tostring(reason))
                         table.insert(tasks_to_cancel, {
                             id = task_id,
                             giver_id = task_info.task_giver_id,
@@ -1538,12 +1489,12 @@ local function do_autocompletion()
     
     -- Always log cancel list size for debugging
     if #tasks_to_cancel > 0 then
-        printf("[FA] Tasks to cancel: " .. tostring(#tasks_to_cancel) .. ", cancel_if_stolen=" .. tostring(cfg.cancel_if_stolen))
+        printf("[FA] Tasks to cancel: %s, cancel_if_stolen=%s", tostring(#tasks_to_cancel), tostring(cfg.cancel_if_stolen))
     end
     
     if cfg.cancel_if_stolen then
         for _, task_data in ipairs(tasks_to_cancel) do
-            printf("[FA] CANCELLING (stolen): " .. tostring(task_data.id) .. " - " .. tostring(task_data.reason))
+            printf("[FA] CANCELLING (stolen): %s - %s", tostring(task_data.id), tostring(task_data.reason))
             
             -- Mark as recently processed BEFORE cancelling (prevents duplicates)
             _recently_processed[task_data.id] = os.time()
@@ -1621,7 +1572,7 @@ function load_state(m_data)
         local rt = reg_data.registered_time
         if not rt or type(rt) ~= "number" or rt < 1000000000 then
             reg_data.registered_time = current_time
-            printf("[FA] Fixed registered_time for task: " .. tostring(task_id) .. " (was: " .. tostring(rt) .. ")")
+            printf("[FA] Fixed registered_time for task: %s (was: %s)", tostring(task_id), tostring(rt))
         end
     end
     
@@ -1718,10 +1669,18 @@ task_manager.task_callback = function(tsk, stage)
         return
     end
     
-    printf("[FA] Applying item compensation for task %s: " .. tostring(compensation.min or 0) .. "-" .. tostring(compensation.max or 0) .. " RU", tsk_id)
+    printf("[FA] Applying item compensation for task %s: %s-%s RU", tsk_id, tostring(compensation.min or 0), tostring(compensation.max or 0))
+    
+    -- save original rewards in case callback errors
+    local original_rewards = rtask.on_complete[1][3]
     rtask.on_complete[1][3] = compensation.rewards
     
-    task_manager_task_callback(tsk, stage)
+    local ok, err = pcall(task_manager_task_callback, tsk, stage)
+    if not ok then
+        printf("![FA] task_callback error, restoring original rewards: %s", tostring(err))
+        rtask.on_complete[1][3] = original_rewards
+        pcall(task_manager_task_callback, tsk, stage)
+    end
 end
 
 printf("[FA] Monkeypatched task_manager.task_callback for item compensation")
