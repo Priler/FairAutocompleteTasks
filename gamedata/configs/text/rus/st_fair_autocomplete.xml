@@ -80,6 +80,13 @@
     <string id="ui_mcm_fair_autocomplete_check_interval_desc">
         <text>Как часто проверять завершение заданий. Меньше = быстрее реакция, но чуть больше нагрузка на CPU</text>
     </string>
+    <string id="ui_mcm_fair_autocomplete_completion_delay">
+        <text>Completion Delay (seconds)</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_completion_delay_desc">
+        <text>Delay between detecting that a task is done and actually completing it. Adds an immersive pause where the task giver "processes" the result before sending the reward. Set to 0 to keep instant completion.</text>
+    </string>
+
     
     <!-- Task Types Headers -->
     <string id="ui_mcm_fair_autocomplete_task_types_header">

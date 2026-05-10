@@ -12,6 +12,7 @@ local defaults = {
     ["require_same_level"] = true,
     ["cancel_if_stolen"] = true,
     ["check_interval"] = 2.0,
+    ["completion_delay"] = 5,
     
     -- Item compensation
     ["compensate_item_rewards"] = true,
@@ -167,6 +168,8 @@ function on_mcm_load()
             -- Advanced
             { id = "check_interval", type = "track", val = 2, min = 0.5, max = 10.0, step = 0.5, def = 2.0,
               hint = "fair_autocomplete_check_interval" },
+            { id = "completion_delay", type = "track", val = 2, min = 0, max = 15, step = 1, def = 5,
+              hint = "fair_autocomplete_completion_delay" },
             { id = "whitelist", type = "input", val = 0, def = "esc_2_12_stalker_fanat_task_3:0",
               hint = "fair_autocomplete_whitelist" },
             { id = "blacklist", type = "input", val = 0, def = "esc_2_12_stalker_wolf_task_3",

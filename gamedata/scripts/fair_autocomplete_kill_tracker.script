@@ -3,9 +3,10 @@
 
 _player_kills = {}
 _player_hits = {}
-_monitored_tasks = {}
-_assault_task_data = {}
-_mutant_task_data = {}
+
+-- proximity-credit fallback for kills with no attributable killer
+_last_actor_shot_time = 0
+_last_actor_shot_pos = nil
 
 -- section to monster type mapping for inference
 local SECTION_TO_MONSTER_TYPE = {
@@ -88,7 +89,7 @@ local function is_companion(obj)
     
     if axr_companions and axr_companions.companion_squads then
         local squad_id = se_obj.group_id
-        if squad_id and axr_companions.companion_squads[squad_id] then
+        if squad_id and squad_id ~= 65535 and axr_companions.companion_squads[squad_id] then
             return true
         end
     end
@@ -274,19 +275,30 @@ function record_kill(victim, killer, is_monster)
     -- Check if player/companion hit first (assist credit)
     local has_assist = was_hit_by_player_or_companion(victim_id)
     
-    -- Only record if killed by player/companion OR if player had assist (hit first)
     if not is_player and not is_comp then
         if has_assist then
             local player_hit, companion_hit = get_assist_credit(victim_id)
             if player_hit then
                 is_player = true
-                dbg_printf("[FA-KillTracker] Victim %s killed by other, but PLAYER had assist", tostring(victim_id))
             elseif companion_hit then
                 is_comp = true
-                dbg_printf("[FA-KillTracker] Victim %s killed by other, but COMPANION had assist", tostring(victim_id))
             end
+        elseif _last_actor_shot_time and _last_actor_shot_time > 0 then
+            local since_shot = time_global() - _last_actor_shot_time
+            if since_shot >= 0 and since_shot <= 3000 then
+                local shot_pos = _last_actor_shot_pos
+                local vpos_ok, vpos = pcall(function() return victim:position() end)
+                if shot_pos and vpos_ok and vpos then
+                    local dx = shot_pos.x - vpos.x
+                    local dy = shot_pos.y - vpos.y
+                    local dz = shot_pos.z - vpos.z
+                    if dx*dx + dy*dy + dz*dz <= 350 * 350 then
+                        is_player = true
+                    end
+                end
+            end
+            if not is_player then return end
         else
-            dbg_printf("[FA-KillTracker] Victim %s killed by non-player/companion (killer_id: %s)", victim_id, killer_id or "nil")
             return
         end
     end
@@ -370,27 +382,28 @@ function record_kill(victim, killer, is_monster)
         group_id = victim_group_id,
     }
     
-    local dist_str = actor_distance and string.format("%.1f", actor_distance) or "nil"
-    printf("[FA-KillTracker] Recorded kill: victim_id=%s, section=%s, group_id=%s, monster_type=%s, smart=%s, faction=%s, by_player=%s, by_companion=%s, distance=%s, same_level=%s",
-        tostring(victim_id), victim:section(), tostring(victim_group_id), monster_type or "none", smart_terrain or "unknown", victim_faction or "none", 
-        tostring(is_player), tostring(is_comp),
-        dist_str,
-        tostring(actor_level == victim_level))
-    
-    -- clean up hit data for this victim (no longer needed after kill recorded)
-    _player_hits[victim_id] = nil
-    
-    -- Update assault task data if relevant
-    update_assault_task_kills(victim_id, smart_terrain)
-    
-    -- Update mutant task data if relevant
-    if is_monster then
-        update_mutant_task_kills(victim:section(), smart_terrain, monster_type)
+    if get_mcm_config(nil, "debug") then
+        local dist_str = actor_distance and string.format("%.1f", actor_distance) or "nil"
+        dbg_printf("[FA-KillTracker] Recorded kill: victim=%s, section=%s, smart=%s, by_player=%s, by_companion=%s, dist=%s",
+            tostring(victim_id), victim:section(), smart_terrain or "unknown",
+            tostring(is_player), tostring(is_comp), dist_str)
     end
+
+    _player_hits[victim_id] = nil
 end
 
 function npc_on_death_callback(npc, who)
     record_kill(npc, who, false)
+end
+
+function actor_on_weapon_fired_callback(actor, weapon, ammo_count, grenade_ammo_count, ammo_type, target)
+    _last_actor_shot_time = time_global()
+    if db.actor and db.actor.position then
+        local ok, pos = pcall(function() return db.actor:position() end)
+        if ok and pos then
+            _last_actor_shot_pos = { x = pos.x, y = pos.y, z = pos.z }
+        end
+    end
 end
 
 function monster_on_death_callback(monster, who)
@@ -562,313 +575,115 @@ function was_squad_member_killed_by_player(squad_id)
     return false
 end
 
--- ### ASSAULT TASK TRACKING
-
-function register_assault_task(task_id, smart_terrain_name)
-    if not smart_terrain_name then
-        dbg_printf("[FA-KillTracker] Cannot register assault task %s: no smart terrain", task_id)
-        return
-    end
-    
-    local enemy_count = count_enemies_at_smart(smart_terrain_name)
-    
-    _assault_task_data[task_id] = {
-        smart_terrain = smart_terrain_name,
-        total_enemies = enemy_count,
-        killed_by_player = 0,
-        enemy_ids = get_enemy_ids_at_smart(smart_terrain_name)
-    }
-    
-    dbg_printf("[FA-KillTracker] Registered assault task %s at %s with %d enemies", 
-        task_id, smart_terrain_name, enemy_count)
-end
-
-function update_assault_task_kills(victim_id, smart_terrain)
-    if not smart_terrain then return end
-    
-    for task_id, data in pairs(_assault_task_data) do
-        if data.smart_terrain == smart_terrain then
-            if data.enemy_ids and data.enemy_ids[victim_id] then
-                data.killed_by_player = (tonumber(data.killed_by_player) or 0) + 1
-                data.enemy_ids[victim_id] = nil
-                
-                dbg_printf("[FA-KillTracker] Assault task %s: player killed enemy at %s (%d/%d)",
-                    task_id, smart_terrain, data.killed_by_player, data.total_enemies or 0)
-            end
-        end
-    end
-end
-
-function get_assault_task_kill_stats(task_id)
-    return _assault_task_data[task_id]
-end
-
-function check_assault_task_requirement(task_id)
-    local data = _assault_task_data[task_id]
-    if not data then
-        dbg_printf("[FA-KillTracker] No assault data for task %s", task_id)
-        return false, "no_data"
-    end
-    
-    local requirement = get_mcm_config(nil, "kill_requirement") or 1
-    local killed = tonumber(data.killed_by_player) or 0
-    local total = tonumber(data.total_enemies) or 0
-    
-    if total == 0 then
-        return true, "empty"
-    end
-    
-    -- 1 = at least one, 2 = at least half, 3 = all
-    if requirement == 1 then
-        local success = killed >= 1
-        dbg_printf("[FA-KillTracker] Assault task %s: at_least_one check - %d/%d = %s", 
-            task_id, killed, total, tostring(success))
-        return success, "at_least_one"
-    elseif requirement == 2 then
-        local half = math.ceil(total / 2)
-        local success = killed >= half
-        dbg_printf("[FA-KillTracker] Assault task %s: at_least_half check - %d/%d (need %d) = %s", 
-            task_id, killed, total, half, tostring(success))
-        return success, "at_least_half"
-    elseif requirement == 3 then
-        local success = killed >= total
-        dbg_printf("[FA-KillTracker] Assault task %s: all check - %d/%d = %s", 
-            task_id, killed, total, tostring(success))
-        return success, "all"
-    end
-    
-    return false, "unknown"
-end
-
-function count_enemies_at_smart(smart_name)
-    local count = 0
-    
-    if not SIMBOARD or not SIMBOARD.smarts_by_names then
-        return count
-    end
-    
-    local smart = SIMBOARD.smarts_by_names[smart_name]
-    if not smart then return count end
-    
-    if smart.squads then
-        for squad_id, _ in pairs(smart.squads) do
-            local squad = alife_object(squad_id)
-            if squad then
-                for member in squad:squad_members() do
-                    count = count + 1
-                end
-            end
-        end
-    end
-    
-    return count
-end
-
-function get_enemy_ids_at_smart(smart_name)
-    local ids = {}
-    
-    if not SIMBOARD or not SIMBOARD.smarts_by_names then
-        return ids
-    end
-    
-    local smart = SIMBOARD.smarts_by_names[smart_name]
-    if not smart then return ids end
-    
-    if smart.squads then
-        for squad_id, _ in pairs(smart.squads) do
-            local squad = alife_object(squad_id)
-            if squad then
-                for member in squad:squad_members() do
-                    ids[member.id] = true
-                end
-            end
-        end
-    end
-    
-    return ids
-end
-
-function unregister_assault_task(task_id)
-    _assault_task_data[task_id] = nil
-end
-
--- ### MUTANT TASK TRACKING
-
-function register_mutant_task(task_id, smart_terrain_name, mutant_section)
-    _mutant_task_data[task_id] = {
-        smart_terrain = smart_terrain_name,
-        mutant_section = mutant_section,
-        killed_count = 0
-    }
-    
-    dbg_printf("[FA-KillTracker] Registered mutant task %s at %s for section %s", 
-        task_id, smart_terrain_name or "any", mutant_section or "any")
-end
-
-function update_mutant_task_kills(section, smart_terrain, monster_type)
-    for task_id, data in pairs(_mutant_task_data) do
-        local section_match = false
-        if not data.mutant_section then
-            section_match = true
-        elseif monster_type and data.mutant_section == monster_type then
-            section_match = true
-        elseif data.mutant_section == section then
-            section_match = true
-        end
-        
-        local location_match = (not data.smart_terrain) or (data.smart_terrain == smart_terrain)
-        
-        if section_match and location_match then
-            data.killed_count = (tonumber(data.killed_count) or 0) + 1
-            dbg_printf("[FA-KillTracker] Mutant task %s: player killed section=%s monster_type=%s at %s (total: %d)",
-                task_id, section, monster_type or "unknown", smart_terrain or "unknown", data.killed_count)
-        end
-    end
-end
-
-function check_mutant_task_requirement(task_id)
-    local data = _mutant_task_data[task_id]
-    if not data then
-        return false
-    end
-    
-    local killed = tonumber(data.killed_count) or 0
-    return killed >= 1
-end
-
-function unregister_mutant_task(task_id)
-    _mutant_task_data[task_id] = nil
-end
-
--- ### OFFLINE DEATH DETECTION
-
-function is_target_alive(target_id)
-    if not target_id then return false end
-    
-    local se_obj = alife_object(target_id)
-    if not se_obj then
-        return false
-    end
-    
-    local success, is_alive = pcall(function()
-        if se_obj.alive then
-            return se_obj:alive()
-        end
-        return true
-    end)
-    
-    if not success then
-        return true
-    end
-    
-    return is_alive
-end
-
-function did_target_die_without_player(target_id)
-    if is_target_alive(target_id) then
-        return false, "alive"
-    end
-    
-    if was_killed_by_player_or_companion(target_id) then
-        return false, "player_killed"
-    end
-    
-    local count_assists = get_mcm_config(nil, "count_assists")
-    if count_assists == nil then
-        count_assists = true
-    end
-    
-    if count_assists and was_hit_by_player_or_companion(target_id) then
-        return false, "player_assisted"
-    end
-    
-    return true, "stolen"
-end
-
 -- ### PERSISTENCE
 
 function save_state(m_data)
     m_data.fa_player_kills = _player_kills
     m_data.fa_player_hits = _player_hits
-    m_data.fa_assault_data = _assault_task_data
-    m_data.fa_mutant_data = _mutant_task_data
-    m_data.fa_monitored_tasks = _monitored_tasks
 end
 
 function load_state(m_data)
     _player_kills = m_data.fa_player_kills or {}
     _player_hits = m_data.fa_player_hits or {}
-    _assault_task_data = m_data.fa_assault_data or {}
-    _mutant_task_data = m_data.fa_mutant_data or {}
-    _monitored_tasks = m_data.fa_monitored_tasks or {}
-    
-    -- normalize kill keys to numbers (fix string/number mismatch from old saves)
-    local normalized = {}
-    for k, v in pairs(_player_kills) do
-        normalized[tonumber(k) or k] = v
-    end
-    _player_kills = normalized
+
+    -- normalize keys to numbers (pstor sometimes returns strings)
+    local nk = {}
+    for k, v in pairs(_player_kills) do nk[tonumber(k) or k] = v end
+    _player_kills = nk
+
+    local nh = {}
+    for k, v in pairs(_player_hits) do nh[tonumber(k) or k] = v end
+    _player_hits = nh
+
+    _last_actor_shot_time = 0
+    _last_actor_shot_pos = nil
 end
 
 -- ### CLEANUP
 
+local DEFAULT_KILL_RETENTION = 1800
+local CLEANUP_INTERVAL = 60
+local MAX_KILL_RECORDS = 500
+local MAX_HIT_RECORDS = 500
+
+local function table_count(t)
+    local n = 0
+    for _ in pairs(t) do n = n + 1 end
+    return n
+end
+
+local function evict_oldest(records, target_count, time_field)
+    local entries = {}
+    for k, v in pairs(records) do
+        local t = nil
+        if time_field then
+            for _, sub in pairs(v) do
+                if sub[time_field] and type(sub[time_field]) == "number" then
+                    if not t or sub[time_field] < t then t = sub[time_field] end
+                end
+            end
+        else
+            t = v.time
+        end
+        entries[#entries + 1] = { key = k, t = t or 0 }
+    end
+    table.sort(entries, function(a, b) return a.t < b.t end)
+    local to_remove = #entries - target_count
+    for i = 1, to_remove do
+        records[entries[i].key] = nil
+    end
+end
+
 function cleanup_old_kills(max_age_seconds)
-    max_age_seconds = max_age_seconds or 172800
-    
+    max_age_seconds = max_age_seconds or DEFAULT_KILL_RETENTION
+
     local current_time = os.time()
     local removed_kills = 0
     local removed_hits = 0
-    
-    -- Cleanup kills
+
     for victim_id, data in pairs(_player_kills) do
         local should_remove = false
-        
-        if not data.time then
+        if not data.time or type(data.time) ~= "number" then
             should_remove = true
-        elseif type(data.time) ~= "number" then
-            -- CTime userdata from old save - can't compare
+        elseif current_time - data.time > max_age_seconds then
             should_remove = true
-        else
-            local age_seconds = current_time - data.time
-            if age_seconds > max_age_seconds then
-                should_remove = true
-            end
         end
-        
         if should_remove then
             _player_kills[victim_id] = nil
             removed_kills = removed_kills + 1
         end
     end
-    
-    -- Cleanup hits
+
     for victim_id, hit_data in pairs(_player_hits) do
         local should_remove = false
         local oldest_hit_time = nil
-        
-        for shooter_id, data in pairs(hit_data) do
+        for _, data in pairs(hit_data) do
             if data.first_hit_time and type(data.first_hit_time) == "number" then
                 if not oldest_hit_time or data.first_hit_time < oldest_hit_time then
                     oldest_hit_time = data.first_hit_time
                 end
             end
         end
-        
         if not oldest_hit_time then
             should_remove = true
-        else
-            local age_seconds = current_time - oldest_hit_time
-            if age_seconds > max_age_seconds then
-                should_remove = true
-            end
+        elseif current_time - oldest_hit_time > max_age_seconds then
+            should_remove = true
         end
-        
         if should_remove then
             _player_hits[victim_id] = nil
             removed_hits = removed_hits + 1
         end
     end
-    
+
+    local kill_count = table_count(_player_kills)
+    if kill_count > MAX_KILL_RECORDS then
+        evict_oldest(_player_kills, MAX_KILL_RECORDS, nil)
+    end
+    local hit_count = table_count(_player_hits)
+    if hit_count > MAX_HIT_RECORDS then
+        evict_oldest(_player_hits, MAX_HIT_RECORDS, "first_hit_time")
+    end
+
     if removed_kills > 0 or removed_hits > 0 then
         dbg_printf("[FA-KillTracker] Cleaned up %d old kill records and %d old hit records", removed_kills, removed_hits)
     end
@@ -881,12 +696,13 @@ function on_game_start()
     RegisterScriptCallback("monster_on_death_callback", monster_on_death_callback)
     RegisterScriptCallback("npc_on_hit_callback", npc_on_hit_callback)
     RegisterScriptCallback("monster_on_hit_callback", monster_on_hit_callback)
+    RegisterScriptCallback("actor_on_weapon_fired", actor_on_weapon_fired_callback)
     RegisterScriptCallback("save_state", save_state)
     RegisterScriptCallback("load_state", load_state)
-    
-    CreateTimeEvent("fa_kill_tracker", "cleanup", 600, function()
-        cleanup_old_kills(172800)
-        ResetTimeEvent("fa_kill_tracker", "cleanup", 600)
+
+    CreateTimeEvent("fa_kill_tracker", "cleanup", CLEANUP_INTERVAL, function()
+        cleanup_old_kills(DEFAULT_KILL_RETENTION)
+        ResetTimeEvent("fa_kill_tracker", "cleanup", CLEANUP_INTERVAL)
         return false
     end)
 end
