@@ -104,12 +104,33 @@ local function is_companion(obj)
     return false
 end
 
+local function se_obj_level_name(se_obj)
+    if not se_obj or not se_obj.m_game_vertex_id then return nil end
+    local gg = game_graph()
+    if not gg then return nil end
+    local al = alife()
+    if not al then return nil end
+    local v = gg:vertex(se_obj.m_game_vertex_id)
+    if not v then return nil end
+    return al:level_name(v:level_id())
+end
+
 local function get_object_smart_terrain(obj)
     if not obj then return nil end
-    
+
     local se_obj = alife_object(obj:id())
     if not se_obj then return nil end
-    
+
+    -- squad linkage can be stale across levels; filter by victim's level
+    local victim_level = se_obj_level_name(se_obj)
+
+    local function smart_matches_level(smart)
+        if not victim_level then return true end
+        local lvl = se_obj_level_name(smart)
+        if not lvl then return true end
+        return lvl == victim_level
+    end
+
     -- For NPCs in squads
     if se_obj.group_id and se_obj.group_id ~= 65535 then
         local squad = alife_object(se_obj.group_id)
@@ -117,24 +138,24 @@ local function get_object_smart_terrain(obj)
             -- Try assigned_target_id first (where squad is going)
             if squad.assigned_target_id then
                 local smart = alife_object(squad.assigned_target_id)
-                if smart and smart.name then
+                if smart and smart.name and smart_matches_level(smart) then
                     return smart:name()
                 end
             end
             -- Try current_target_id
             if squad.current_target_id then
                 local smart = alife_object(squad.current_target_id)
-                if smart and smart.name then
+                if smart and smart.name and smart_matches_level(smart) then
                     return smart:name()
                 end
             end
         end
     end
-    
+
     -- Fallback: try to get smart terrain from m_smart_terrain_id
     if se_obj.m_smart_terrain_id and se_obj.m_smart_terrain_id ~= 65535 then
         local smart = alife_object(se_obj.m_smart_terrain_id)
-        if smart and smart.name then
+        if smart and smart.name and smart_matches_level(smart) then
             return smart:name()
         end
     end
@@ -284,8 +305,9 @@ function record_kill(victim, killer, is_monster)
                 is_comp = true
             end
         elseif _last_actor_shot_time and _last_actor_shot_time > 0 then
+            -- 10s/350m proximity credit
             local since_shot = time_global() - _last_actor_shot_time
-            if since_shot >= 0 and since_shot <= 3000 then
+            if since_shot >= 0 and since_shot <= 10000 then
                 local shot_pos = _last_actor_shot_pos
                 local vpos_ok, vpos = pcall(function() return victim:position() end)
                 if shot_pos and vpos_ok and vpos then
@@ -297,11 +319,11 @@ function record_kill(victim, killer, is_monster)
                     end
                 end
             end
-            if not is_player then return end
-        else
-            return
         end
+        -- fall through: record as is_npc_kill for positive-theft evidence
     end
+
+    local is_npc_kill = not is_player and not is_comp
     
     local smart_terrain = get_object_smart_terrain(victim)
     
@@ -373,6 +395,7 @@ function record_kill(victim, killer, is_monster)
         position = victim_position,
         is_player_kill = is_player,
         is_companion_kill = is_comp,
+        is_npc_kill = is_npc_kill,
         is_monster = is_monster or false,
         faction = victim_faction,
         monster_type = monster_type,
@@ -389,7 +412,7 @@ function record_kill(victim, killer, is_monster)
             tostring(is_player), tostring(is_comp), dist_str)
     end
 
-    _player_hits[victim_id] = nil
+    -- intentionally don't wipe _player_hits here; assist override needs it
 end
 
 function npc_on_death_callback(npc, who)
@@ -685,7 +708,7 @@ function cleanup_old_kills(max_age_seconds)
     end
 
     if removed_kills > 0 or removed_hits > 0 then
-        dbg_printf("[FA-KillTracker] Cleaned up %d old kill records and %d old hit records", removed_kills, removed_hits)
+        dbg_printf("[FA-KillTracker] Cleanup done: kills_removed=%d, hits_removed=%d", removed_kills, removed_hits)
     end
 end
 

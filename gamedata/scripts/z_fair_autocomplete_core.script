@@ -94,6 +94,12 @@ local _cycle_config = nil
 local _pending_completions = {}
 local _pending_cancellations = {}
 
+-- time-skip detection (sleep/fast-travel). see DEV_STRATEGY.md §8.
+local _last_cycle_game_time = nil
+local _last_time_skip_global = 0
+local TIME_SKIP_GAME_SEC = 1800
+local TIME_SKIP_GRACE_MS = 60000
+
 -- module cache
 local _utils = nil
 local function get_utils()
@@ -803,9 +809,13 @@ local function validate_bounty_kill(task_id)
     local kt_norm = tonumber(target_id) or target_id
     local kill_data = tracker._player_kills and tracker._player_kills[kt_norm]
     if kill_data and not kill_data.is_player_kill and not kill_data.is_companion_kill then
+        -- assist override for bad attribution (anomaly tick, splash, etc.)
+        if tracker.was_hit_by_player_or_companion and tracker.was_hit_by_player_or_companion(kt_norm) then
+            return true, "target_hit_then_died"
+        end
         return false, "stolen_someone_else_killed"
     end
-    return false, "uncertain_no_record"
+    return true, "assumed_player_no_record"
 end
 
 local function validate_assault_kill(task_id)
@@ -857,15 +867,17 @@ local function validate_assault_kill(task_id)
         return false, "uncertain_no_tracker"
     end
 
+    -- 10-min pre-task grace window (player may clear before accepting)
+    local kill_eligibility_cutoff = task_registered_time - 600
+
     local player_kills_at_location = 0
     local player_kills_nearby = 0
+    local npc_kills_at_location = 0
+    local npc_kills_nearby = 0
 
     for _, kill_data in pairs(tracker._player_kills) do
         local kill_time = get_time_as_number(kill_data.time)
-        if kill_time >= task_registered_time
-           and (kill_data.is_player_kill or kill_data.is_companion_kill)
-           and not kill_data.is_monster
-        then
+        if kill_time >= kill_eligibility_cutoff and not kill_data.is_monster then
             local location_match = smart_name and kill_data.location == smart_name
             local nearby_match = false
             if smart_position and kill_data.position then
@@ -879,8 +891,13 @@ local function validate_assault_kill(task_id)
                     end
                 end
             end
-            if location_match then player_kills_at_location = player_kills_at_location + 1 end
-            if nearby_match then player_kills_nearby = player_kills_nearby + 1 end
+            if kill_data.is_player_kill or kill_data.is_companion_kill then
+                if location_match then player_kills_at_location = player_kills_at_location + 1 end
+                if nearby_match then player_kills_nearby = player_kills_nearby + 1 end
+            elseif kill_data.is_npc_kill then
+                if location_match then npc_kills_at_location = npc_kills_at_location + 1 end
+                if nearby_match then npc_kills_nearby = npc_kills_nearby + 1 end
+            end
         end
     end
 
@@ -894,7 +911,12 @@ local function validate_assault_kill(task_id)
         return true, "actor_shot_near_smart"
     end
 
-    return false, "uncertain_smart_cleared"
+    local npc_kills = math.max(npc_kills_at_location, npc_kills_nearby)
+    if npc_kills > 0 then
+        return false, "stolen_npc_cleared"
+    end
+
+    return true, "assumed_smart_cleared"
 end
 
 local function validate_defense_kill(task_id)
@@ -1045,9 +1067,12 @@ local function validate_mutant_hunt_kill(task_id)
 
         local kill_data = tracker._player_kills[target_id_norm]
         if kill_data and not kill_data.is_player_kill and not kill_data.is_companion_kill then
+            if tracker.was_hit_by_player_or_companion and tracker.was_hit_by_player_or_companion(target_id_norm) then
+                return true, "target_hit_then_died"
+            end
             return false, "stolen_someone_else_killed"
         end
-        return false, "uncertain_no_record"
+        return true, "assumed_player_no_record"
     end
 
     -- area-based mutant hunt (spring_clean etc.)
@@ -1055,18 +1080,39 @@ local function validate_mutant_hunt_kill(task_id)
         return false, "uncertain_no_location"
     end
 
-    local current_time = os.time()
-    local recent_window = 300
+    -- 10-min pre-task grace window; same as assault validator
+    local reg = _registered_tasks[task_id]
+    local task_registered_time = get_task_registered_time(reg)
+    local kill_eligibility_cutoff = task_registered_time - 600
     local kills_at_location = 0
     local kills_nearby = 0
+    local kills_by_type = 0
+    local npc_kills_at_location = 0
+    local npc_kills_nearby = 0
+    local npc_kills_by_type = 0
+
+    -- fallback for wrong-smart-resolution: match by mutant type. generic tags
+    -- act as wildcard since some functors don't store the specific base type.
+    local expected_base_type = reg and reg.mutant_section
+    local is_wildcard_type = expected_base_type
+        and (expected_base_type == "monster" or expected_base_type == "creature"
+             or expected_base_type == "mutant" or expected_base_type == "any")
+
+    local function matches_expected_type(kd)
+        if is_wildcard_type then return true end
+        if not expected_base_type or not kd.section then return false end
+        local kill_base = string.match(kd.section, "^([^_]+)")
+        return kill_base and (kill_base == expected_base_type
+            or kd.monster_type == expected_base_type
+            or kd.section == expected_base_type)
+    end
 
     for _, kill_data in pairs(tracker._player_kills) do
-        if kill_data.is_monster and (kill_data.is_player_kill or kill_data.is_companion_kill) then
+        if kill_data.is_monster then
             local kill_time = get_time_as_number(kill_data.time)
-            if (current_time - kill_time) <= recent_window then
-                if smart_name and kill_data.location == smart_name then
-                    kills_at_location = kills_at_location + 1
-                end
+            if kill_time >= kill_eligibility_cutoff then
+                local at_loc = smart_name and kill_data.location == smart_name
+                local nearby = false
                 if smart_position and kill_data.position then
                     local kp = kill_data.position
                     if type(kp) == "table" and kp.x then
@@ -1074,22 +1120,45 @@ local function validate_mutant_hunt_kill(task_id)
                         local dy = smart_position.y - kp.y
                         local dz = smart_position.z - kp.z
                         if dx*dx + dy*dy + dz*dz <= 150 * 150 then
-                            kills_nearby = kills_nearby + 1
+                            nearby = true
                         end
                     end
+                end
+                local by_type = matches_expected_type(kill_data)
+                if kill_data.is_player_kill or kill_data.is_companion_kill then
+                    if at_loc then kills_at_location = kills_at_location + 1 end
+                    if nearby then kills_nearby = kills_nearby + 1 end
+                    if by_type then kills_by_type = kills_by_type + 1 end
+                elseif kill_data.is_npc_kill then
+                    if at_loc then npc_kills_at_location = npc_kills_at_location + 1 end
+                    if nearby then npc_kills_nearby = npc_kills_nearby + 1 end
+                    if by_type then npc_kills_by_type = npc_kills_by_type + 1 end
                 end
             end
         end
     end
 
+    if get_mcm_config(nil, "debug") then
+        printf("[FA-Hunt] task=%s smart_name=%s smart_pos=%s mutant_section=%s wildcard=%s player(at_loc=%s nearby=%s by_type=%s) npc(at_loc=%s nearby=%s by_type=%s)",
+            tostring(task_id), tostring(smart_name), tostring(smart_position ~= nil),
+            tostring(expected_base_type), tostring(is_wildcard_type),
+            tostring(kills_at_location), tostring(kills_nearby), tostring(kills_by_type),
+            tostring(npc_kills_at_location), tostring(npc_kills_nearby), tostring(npc_kills_by_type))
+    end
+
     if kills_at_location > 0 then return true, "kills_at_location" end
     if kills_nearby > 0 then return true, "kills_nearby" end
+    if kills_by_type > 0 then return true, "kills_by_type" end
 
     if smart_position and actor_recent_shot_near(tracker, smart_position, 250, 60000) then
         return true, "actor_shot_near_smart"
     end
 
-    return false, "uncertain_no_kills_at_location"
+    if npc_kills_at_location > 0 or npc_kills_nearby > 0 or npc_kills_by_type > 0 then
+        return false, "stolen_npc_cleared"
+    end
+
+    return true, "assumed_smart_cleared"
 end
 
 -- ### AUTOCOMPLETE CHECK
@@ -1216,19 +1285,23 @@ local function should_autocomplete(task_id, task_info)
     if get_mcm_config(nil, "require_player_kill") then
         local task_type = get_task_type(target_functor, task_id)
         if KILL_VALIDATION_TYPES[task_type] then
-            local valid, reason
+            local valid, reason, prefix
             if task_type == "bounty" then
                 valid, reason = validate_bounty_kill(task_id)
-                if not valid then return false, "bounty_" .. reason end
+                prefix = "bounty_"
             elseif task_type == "assault" then
                 valid, reason = validate_assault_kill(task_id)
-                if not valid then return false, "assault_" .. reason end
+                prefix = "assault_"
             elseif task_type == "defense" then
                 valid, reason = validate_defense_kill(task_id)
-                if not valid then return false, "defense_" .. reason end
+                prefix = "defense_"
             elseif task_type == "mutant_hunt" then
                 valid, reason = validate_mutant_hunt_kill(task_id)
-                if not valid then return false, "mutant_" .. reason end
+                prefix = "mutant_"
+            end
+            -- propagate reason on both paths; guards downstream need it
+            if reason and prefix then
+                return valid, prefix .. reason
             end
         end
     end
@@ -1357,6 +1430,8 @@ end
 
 local function fire_cancellation(tm, task_id, giver_id, reason)
     if not is_task_in_progress(task_id) then
+        -- engine processed during delay; condlists already stripped
+        pcall(function() show_stolen_message(task_id, giver_id) end)
         unregister_task(task_id)
         return false
     end
@@ -1375,6 +1450,13 @@ local function fire_cancellation(tm, task_id, giver_id, reason)
                 end
             end
         end
+
+        -- immediate-fire path (delay_ms == 0) didn't go through queue strip
+        local task_info_entry = tm.task_info and tm.task_info[task_id]
+        if task_info_entry then
+            task_info_entry.on_fail = nil
+        end
+
         tm:set_task_cancelled(task_id)
         show_stolen_message(task_id, giver_id)
     end)
@@ -1411,6 +1493,26 @@ local function drain_pending_queues(tm, now_ms)
     return already_queued
 end
 
+local function detect_time_skip()
+    local ok, current_gt = pcall(function() return game.get_game_time() end)
+    if not ok or not current_gt then return false end
+    if _last_cycle_game_time then
+        local ok2, diff_sec = pcall(function() return current_gt:diffSec(_last_cycle_game_time) end)
+        if ok2 and diff_sec and diff_sec >= TIME_SKIP_GAME_SEC then
+            _last_time_skip_global = time_global()
+            _last_cycle_game_time = current_gt
+            return true
+        end
+    end
+    _last_cycle_game_time = current_gt
+    return false
+end
+
+local function is_recent_time_skip()
+    return _last_time_skip_global > 0
+        and (time_global() - _last_time_skip_global) < TIME_SKIP_GRACE_MS
+end
+
 local function do_autocompletion()
     if not _mod_ready then return end
 
@@ -1420,6 +1522,8 @@ local function do_autocompletion()
     local cfg = get_cycle_config()
 
     if not cfg.enable then return end
+
+    detect_time_skip()
 
     if cfg.pda_check then
         if not db.actor then return end
@@ -1456,6 +1560,15 @@ local function do_autocompletion()
                 local ok, err = pcall(function()
                     local should, reason = should_autocomplete(task_id, task_info)
 
+                    -- alife-clean guard: weak-evidence autocompletes right
+                    -- after sleep/fast-travel become stolen. see §8.
+                    if should and reason and reason:find("assumed_")
+                       and cfg.cancel_if_stolen and is_recent_time_skip()
+                    then
+                        should = false
+                        reason = "stolen_alife_clean"
+                    end
+
                     if cfg.debug then
                         printf("[FA] Task %s: should=%s, reason=%s",
                             tostring(task_id), tostring(should), tostring(reason))
@@ -1484,6 +1597,14 @@ local function do_autocompletion()
                         end
                     elseif cfg.cancel_if_stolen and reason and reason:find("stolen_") then
                         _recently_processed[task_id] = os.time()
+
+                        -- strip condlists so engine update() during delay can't
+                        -- pay rewards. safe to mutate: ref is already-parsed.
+                        if task_info then
+                            task_info.on_complete = nil
+                            task_info.on_fail = nil
+                        end
+
                         if delay_ms > 0 then
                             _pending_cancellations[task_id] = {
                                 ready_at = now_ms + delay_ms,
@@ -1551,6 +1672,14 @@ function save_state(m_data)
     end
     m_data.fa_pending_completions = pc
     m_data.fa_pending_cancellations = px
+
+    -- persist queue-time flag so save-during-delay still pays money comp on
+    -- load. see DEV_STRATEGY.md invariant #2.
+    local ta = {}
+    for tid, v in pairs(_tasks_being_autocompleted) do
+        if v then ta[tid] = true end
+    end
+    m_data.fa_tasks_being_autocompleted = ta
 end
 
 function load_state(m_data)
@@ -1584,6 +1713,25 @@ function load_state(m_data)
                 giver_id = e.giver_id,
                 reason = e.reason,
             }
+        end
+    end
+
+    -- restore queue-time flags, see save_state above.
+    if m_data.fa_tasks_being_autocompleted then
+        for tid, v in pairs(m_data.fa_tasks_being_autocompleted) do
+            if v then _tasks_being_autocompleted[tid] = true end
+        end
+    end
+
+    -- re-strip condlists for pending cancels; engine reloaded them from INI.
+    local tm = task_manager.get_task_manager()
+    if tm and tm.task_info then
+        for tid, _ in pairs(_pending_cancellations) do
+            local ti = tm.task_info[tid]
+            if ti then
+                ti.on_complete = nil
+                ti.on_fail = nil
+            end
         end
     end
 

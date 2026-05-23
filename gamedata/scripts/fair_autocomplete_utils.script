@@ -389,6 +389,7 @@ function is_in_list(list_string, task_id)
 end
 
 -- ### TASK STATE HELPERS
+-- below are DEAD CODE - no internal callers
 
 function cancel_task_no_penalty(task_id)
     local tm = task_manager.get_task_manager()
