@@ -100,8 +100,25 @@ local function is_companion(obj)
             return true
         end
     end
-    
+
     return false
+end
+
+-- Stealth kills FIX. (gameplay_silent_kills.script)
+-- for some dumbass reason the game sets the killer to a weapon instead of an actor
+-- when the kill is stealth.
+-- and the death/hit callbacks report the weapon object, not its owner.
+-- A melee backstab also leaves no shot for the proximity-credit fallback, so
+-- the kill lands as is_npc_kill and a clean assassination false-cancels as
+-- stolen. Resolve a held item back to the stalker carrying it before
+-- attribution. A stalker/monster has no inventory parent, so this is a no-op
+-- for normal kills.
+local function resolve_to_owner(obj)
+    if not obj then return obj end
+    if obj:id() == AC_ID then return obj end
+    local ok, parent = pcall(function() return obj:parent() end)
+    if ok and parent then return parent end
+    return obj
 end
 
 local function se_obj_level_name(se_obj)
@@ -197,7 +214,9 @@ end
 
 function record_hit(victim, shooter)
     if not victim or not shooter then return end
-    
+
+    shooter = resolve_to_owner(shooter)
+
     local victim_id = victim:id()
     local shooter_id = shooter:id()
     
@@ -286,7 +305,9 @@ end
 
 function record_kill(victim, killer, is_monster)
     if not victim then return end
-    
+
+    killer = resolve_to_owner(killer)
+
     local victim_id = victim:id()
     local killer_id = killer and killer:id() or nil
     

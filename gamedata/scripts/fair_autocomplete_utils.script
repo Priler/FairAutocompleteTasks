@@ -27,22 +27,28 @@ end
 -- ### PDA CHECK
 
 function has_pda(who)
-    local valid_pda_devices = {
-        ["device_pda_1"] = true,
-        ["device_pda_2"] = true,
-        ["device_pda_3"] = true,
-        ["device_pda_milspec"] = true
-    }
-
     who = who or db.actor
+    if not who then return false end
 
-    for k, v in pairs(valid_pda_devices) do
-        if (who:object(k)) and (v) then
-            return true
-        end
+    -- detect the PDA by SLOT (8), not a hardcoded section list. Robust to
+    -- renamed/upgraded PDAs (Fatal Error tiers device_pda_0/4/getac/new, etc.).
+    -- slot 8 = PDA in Anomaly (item_device.script, ui_inventory). see SESSION_NOTES.
+    if who.item_in_slot and who:item_in_slot(8) then
+        return true
     end
 
-    return false
+    -- fallback: any pda-class item anywhere in inventory (PDA not equipped)
+    local found = false
+    if who.iterate_inventory then
+        who:iterate_inventory(function(owner, itm)
+            local sec = itm and itm:section()
+            if sec and (string.find(sec, "device_pda", 1, true)
+                        or string.find(sec, "itm_pda", 1, true)) then
+                found = true
+            end
+        end, who)
+    end
+    return found
 end
 
 -- ### ITEM PRICE CALCULATION
@@ -63,7 +69,7 @@ end
 
 function get_base_cost(itm)
     if not itm then return 0 end
-    local sec, amount = string.match(itm, "(.*)__([1-9])")
+    local sec, amount = string.match(itm, "(.*)__(%d+)")
     if not sec then
         return ini_sys:r_float(itm, "cost") or 0
     end

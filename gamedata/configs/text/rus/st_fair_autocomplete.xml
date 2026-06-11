@@ -168,6 +168,12 @@
         <text>"Сканирующее поле" и "Установить сканер у аномалии Симбионт"</text>
     </string>
     
+    <string id="ui_mcm_fair_autocomplete_fetch">
+        <text>Задачи на доставку</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_fetch_desc">
+        <text>Собрать и доставить предметы заказчику. На финальной стадии предметы уже у вас, поэтому проверка убийств не нужна. Просто удобство, чтобы не возвращаться.</text>
+    </string>
     <!-- Special Task Types -->
     <string id="ui_mcm_fair_autocomplete_snitch">
         <text>Задание "Топперы"</text>
@@ -219,15 +225,15 @@
         <text>Сколько врагов нужно убить для автозавершения заданий на штурм</text>
     </string>
     
-    <string id="ui_mcm_fair_autocomplete_kill_req_one">
+    <string id="fair_autocomplete_kill_requirement_lst_one">
         <text>Хотя бы одного врага</text>
     </string>
     
-    <string id="ui_mcm_fair_autocomplete_kill_req_half">
+    <string id="fair_autocomplete_kill_requirement_lst_half">
         <text>Хотя бы половину</text>
     </string>
     
-    <string id="ui_mcm_fair_autocomplete_kill_req_all">
+    <string id="fair_autocomplete_kill_requirement_lst_all">
         <text>Всех врагов</text>
     </string>
     
@@ -247,12 +253,6 @@
     </string>
     
     <!-- UI Options -->
-    <string id="ui_mcm_fair_autocomplete_show_target_info">
-        <text>Показывать расширенную информацию о цели</text>
-    </string>
-    <string id="ui_mcm_fair_autocomplete_show_target_info_desc">
-        <text>Отображать подробную информацию о целях задания при его принятии</text>
-    </string>
     
     <string id="ui_mcm_fair_autocomplete_show_stolen_message">
         <text>Показывать сообщение о краже задания</text>
@@ -300,8 +300,56 @@
         <text>Задание выполнено автоматически.</text>
     </string>
     
-    <string id="st_fa_target_info">
-        <text>Информация о цели</text>
+
+
+    <string id="ui_mcm_fair_autocomplete_no_penalty_on_giver_death">
+        <text>Без потери репутации при гибели заказчика</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_no_penalty_on_giver_death_desc">
+        <text>Когда заказчик задания погибает (например, забрёл в перестрелку), отменять задание без обычного штрафа к репутации, а не проваливать его. Задания на сопровождение/оборону/спасение, где смысл в том, чтобы сохранить кому-то жизнь, по-прежнему применяют штраф.</text>
+    </string>
+
+    <!-- Fatal Error compatibility -->
+    <string id="ui_mcm_fair_autocomplete_respect_fe_pda_flag">
+        <text>Fatal Error: учитывать флаг автозавершения КПК</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_respect_fe_pda_flag_desc">
+        <text>Совместимость с модом Fatal Error. Если включено, задания автозавершаются только если это позволяет уровень установленного КПК (Fatal Error помечает некоторые КПК флагом autocomplete = false). Если выключено (по умолчанию), Fair Autocomplete работает с любым КПК. Не имеет эффекта без Fatal Error (или другого мода, добавляющего флаг "autocomplete" к КПК).</text>
+    </string>
+
+    <!-- Level Proximity Gate -->
+    <string id="ui_mcm_fair_autocomplete_level_proximity_check">
+        <text>Ограничить автозавершение по локации</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_level_proximity_check_desc">
+        <text>По умолчанию выключено. Автозавершать задание только если игрок достаточно близко к локации заказчика. Помогает избежать дисбаланса прогрессии GAMMA: уровень тайника с инструментами зависит от локации, где вы завершаете задание, поэтому завершение низкоуровневых заданий далеко на севере выдавало бы инструменты более высокого уровня. Если игрок слишком далеко, задание не трогается (Anomaly завершит его обычным образом с исходными наградами). Никогда не вызывает отмену.</text>
+    </string>
+
+    <string id="ui_mcm_fair_autocomplete_level_proximity_mode">
+        <text>Режим близости</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_level_proximity_mode_desc">
+        <text>Та же локация: игрок должен быть на локации заказчика. В пределах N соседей: игрок в пределах N переходов от локации заказчика. Та же половина карты: игрок и заказчик в одной половине Зоны (всё ниже Рыжего леса считается югом).</text>
+    </string>
+    <string id="fair_autocomplete_level_proximity_mode_lst_same">
+        <text>Та же локация</text>
+    </string>
+    <string id="fair_autocomplete_level_proximity_mode_lst_neighbor">
+        <text>В пределах N соседних локаций</text>
+    </string>
+    <string id="fair_autocomplete_level_proximity_mode_lst_half">
+        <text>Та же половина карты (Юг/Север)</text>
+    </string>
+
+    <string id="ui_mcm_fair_autocomplete_level_proximity_n">
+        <text>Дистанция соседства (N)</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_level_proximity_n_desc">
+        <text>Используется только в режиме «В пределах N соседних локаций». Сколько переходов от локации заказчика всё ещё считается достаточно близким. Пример: заказчик в Кордоне, N=2 разрешает до Агропрома, но не до Армейских складов.</text>
+    </string>
+
+    <string id="st_fa_task_giver_dead_msg">
+        <text>Ваш заказчик мёртв. Задание отменено без штрафа.</text>
     </string>
 
 </string_table>

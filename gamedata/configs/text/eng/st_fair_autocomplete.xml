@@ -167,7 +167,14 @@
     <string id="ui_mcm_fair_autocomplete_scanner_desc">
         <text>"Scanning Field" and "Plant the Scanner Near the Symbiont Anomaly"</text>
     </string>
-    
+
+    <string id="ui_mcm_fair_autocomplete_fetch">
+        <text>Fetch Tasks</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_fetch_desc">
+        <text>Collect and deliver items to the task giver. Reaching the final stage means you already have the items, so these complete with no kill check. Pure walk-back convenience.</text>
+    </string>
+
     <!-- Special Task Types -->
     <string id="ui_mcm_fair_autocomplete_snitch">
         <text>Task "Toppers"</text>
@@ -219,15 +226,15 @@
         <text>How many enemies you must kill for assault tasks to autocomplete</text>
     </string>
     
-    <string id="ui_mcm_fair_autocomplete_kill_req_one">
+    <string id="fair_autocomplete_kill_requirement_lst_one">
         <text>At Least One Enemy</text>
     </string>
-    
-    <string id="ui_mcm_fair_autocomplete_kill_req_half">
+
+    <string id="fair_autocomplete_kill_requirement_lst_half">
         <text>At Least Half</text>
     </string>
-    
-    <string id="ui_mcm_fair_autocomplete_kill_req_all">
+
+    <string id="fair_autocomplete_kill_requirement_lst_all">
         <text>All Enemies</text>
     </string>
     
@@ -247,13 +254,6 @@
     </string>
     
     <!-- UI Options -->
-    <string id="ui_mcm_fair_autocomplete_show_target_info">
-        <text>Show Extended Target Info</text>
-    </string>
-    <string id="ui_mcm_fair_autocomplete_show_target_info_desc">
-        <text>Display detailed information about task targets when accepting tasks</text>
-    </string>
-    
     <string id="ui_mcm_fair_autocomplete_show_stolen_message">
         <text>Show Stolen Task Message</text>
     </string>
@@ -282,6 +282,52 @@
     <string id="ui_mcm_fair_autocomplete_debug_desc">
         <text>Only useful for modders. Prints detailed information to the console.</text>
     </string>
+
+    <string id="ui_mcm_fair_autocomplete_no_penalty_on_giver_death">
+        <text>No Goodwill Loss When Task Giver Dies</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_no_penalty_on_giver_death_desc">
+        <text>When a task giver is killed (e.g. wanders into a firefight), cancel the task without the usual goodwill penalty instead of failing it. Escort/defense/rescue tasks, where keeping someone alive is the point, still apply the penalty.</text>
+    </string>
+
+    <!-- Fatal Error compatibility -->
+    <string id="ui_mcm_fair_autocomplete_respect_fe_pda_flag">
+        <text>Fatal Error: Respect PDA Autocomplete Flag</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_respect_fe_pda_flag_desc">
+        <text>Compatibility with the Fatal Error mod. When enabled, tasks only autocomplete if the equipped PDA's tier permits it (Fatal Error flags some PDAs with autocomplete = false). When disabled (default), Fair Autocomplete works with any PDA. Has no effect unless Fatal Error (or another mod adding the PDA "autocomplete" flag) is installed.</text>
+    </string>
+
+    <!-- Level Proximity Gate -->
+    <string id="ui_mcm_fair_autocomplete_level_proximity_check">
+        <text>Limit Autocomplete by Location</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_level_proximity_check_desc">
+        <text>Off by default. Only autocomplete a task when the player is close enough to the task giver's level. Helps avoid GAMMA progression imbalance: the tools-stash tier the game grants depends on the level where you finish a task, so completing low-level tasks far up north would hand out higher-tier tools. When the player is too far, the task is left alone (Anomaly completes it normally with the original rewards). Never causes a cancel.</text>
+    </string>
+
+    <string id="ui_mcm_fair_autocomplete_level_proximity_mode">
+        <text>Proximity Mode</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_level_proximity_mode_desc">
+        <text>Same level: player must be on the giver's level. Within N neighbors: player within N map transitions of the giver's level. Same map half: player and giver in the same half of the Zone (anything below Red Forest is south).</text>
+    </string>
+    <string id="fair_autocomplete_level_proximity_mode_lst_same">
+        <text>Same level</text>
+    </string>
+    <string id="fair_autocomplete_level_proximity_mode_lst_neighbor">
+        <text>Within N neighbor levels</text>
+    </string>
+    <string id="fair_autocomplete_level_proximity_mode_lst_half">
+        <text>Same map half (South/North)</text>
+    </string>
+
+    <string id="ui_mcm_fair_autocomplete_level_proximity_n">
+        <text>Neighbor Distance (N)</text>
+    </string>
+    <string id="ui_mcm_fair_autocomplete_level_proximity_n_desc">
+        <text>Used only in "Within N neighbor levels" mode. How many map transitions away from the giver's level still counts as close enough. Example: giver in Cordon, N=2 allows up to Agroprom but not Army Warehouses.</text>
+    </string>
     
     <!-- In-game Messages -->
     <string id="st_fa_task_stolen_msg_1">
@@ -300,8 +346,8 @@
         <text>Task completed automatically.</text>
     </string>
     
-    <string id="st_fa_target_info">
-        <text>Target Information</text>
+    <string id="st_fa_task_giver_dead_msg">
+        <text>Your task giver is dead. Task cancelled, no penalty.</text>
     </string>
 
 </string_table>

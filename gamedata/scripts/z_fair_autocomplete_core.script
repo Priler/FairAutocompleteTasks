@@ -13,12 +13,17 @@ local function get_mcm_config(category, key)
         enable = true,
         enable_autocomplete = true,
         pda_check = true,
+        respect_fe_pda_flag = false,
+        no_penalty_on_giver_death = true,
         require_player_kill = true,
         companion_kills_count = true,
         count_assists = true,
         max_kill_distance = 0,
         require_same_level = true,
         cancel_if_stolen = true,
+        level_proximity_check = false,
+        level_proximity_mode = 1,
+        level_proximity_n = 2,
         check_interval = 2.0,
         completion_delay = 5,
         -- Task types
@@ -38,16 +43,14 @@ local function get_mcm_config(category, key)
         destroy_btrs = true,
         research_hunt = false,
         recover_tracker = false,
-        -- Kill requirement (1=one, 2=half, 3=all)
-        kill_requirement = 1,
+        fetch = false,
         -- Rewards
         compensate_item_rewards = true,
         compensation_coefficient = 0.4,
         -- UI
-        show_target_info = true,
         show_stolen_message = true,
         -- Lists
-        whitelist = "esc_2_12_stalker_fanat_task_3:0",
+        whitelist = "",
         blacklist = "esc_2_12_stalker_wolf_task_3",
         -- Debug
         debug = false,
@@ -85,6 +88,7 @@ _task_cache = {}
 _task_cache_count = 0  -- Track cache size
 local _registered_tasks = {}
 local _recently_processed = {}  -- Tasks recently completed/cancelled (prevent duplicates)
+local _last_logged_stage = {}   -- task_id to last stage we printed, for stage-change logging
 _task_compensation_prices = {}  -- Cache for item reward compensation (GLOBAL for task_callback)
 _tasks_being_autocompleted = {}
 
@@ -167,14 +171,26 @@ local TASK_FUNCTOR_MAP = {
     -- defense tasks
     ["gd_task_target_functor"] = { key = "defense", type = "defense" },
     
-    -- non-kill tasks
+    -- special non-kill tasks: not pure QoL. hostage and spy involve combat and
+    -- carry their own post-completion cleanup; fate is multi-stage and story
+    -- shaped. kept separate from the QoL cluster below.
     ["simulation_task_target"] = { key = "hostage", type = "hostage" },
     ["spy_task_target_functor"] = { key = "spy_extract", type = "spy" },
     ["general_fate"] = { key = "fate", type = "fate" },
+
+    -- QoL cluster: inherently-done non-kill tasks. reaching stage_complete means
+    -- the player already holds the item, took the measurement or placed the
+    -- scanner, so there is no theft vector and no kill validation runs. These
+    -- only skip the walk back to the giver. All off by default; opt-in via MCM.
+    -- general_delivery is deliberately excluded: it completes through dialog with
+    -- a separate recipient NPC, so the travel is the task, not walk-back tedium.
     ["recover_item_on_corpse_target_functor"] = { key = "scripted", type = "scripted" },
     ["drx_sl_quest_item_task_target"] = { key = "retrieve", type = "retrieve" },
     ["general_measure"] = { key = "measurements", type = "measurements" },
     ["anomaly_scanner_task_target"] = { key = "scanner", type = "scanner" },
+    ["general_fetch_task"] = { key = "fetch", type = "fetch" },
+    ["multifetch_target_functor"] = { key = "fetch", type = "fetch" },
+    ["general_warfare_fetch_task"] = { key = "fetch", type = "fetch" },
 }
 
 -- task IDs that should be treated as a certain type (overrides functor detection)
@@ -196,6 +212,15 @@ local KILL_VALIDATION_TYPES = {
     ["bounty"] = true,
     ["mutant_hunt"] = true,
     ["defense"] = true,
+}
+
+-- task types where the giver dying is the PLAYER's failure (keep-alive /
+-- escort / defend), so the goodwill penalty should stand. Everything else
+-- treats giver death as incidental. see SESSION_NOTES (Banjaji merge).
+local GIVER_DEATH_PENALTY_TYPES = {
+    ["defense"] = true,
+    ["hostage"] = true,
+    ["spy"] = true,
 }
 
 -- check if task matches any prefix override
@@ -290,11 +315,43 @@ local function show_stolen_message(task_id, task_giver_id)
     end
     
     msg = "%c[default]" .. msg
-    
+
     if xr_sound and xr_sound.set_sound_play then
         xr_sound.set_sound_play(AC_ID, "pda_tips")
     end
-    
+
+    db.actor:give_game_news(header, msg, icon, 0, 5000)
+end
+
+-- neutral PDA note for the "task giver died" cancel (no goodwill penalty path)
+local function show_giver_dead_message(task_id, task_giver_id)
+    if not db.actor then return end
+
+    local msg = game.translate_string("st_fa_task_giver_dead_msg")
+    if not msg or msg == "st_fa_task_giver_dead_msg" then
+        msg = "Your task giver is dead. Task cancelled, no penalty."
+    end
+
+    local header = "PDA"
+    local icon = "ui_inGame2_PD_Otmena_zadaniya"
+    if task_giver_id then
+        local se_obj = alife_object(task_giver_id)
+        if se_obj then
+            if se_obj.character_name then
+                local n = se_obj:character_name()
+                if n and n ~= "" then header = n end
+            end
+            if se_obj.character_icon then
+                local ic = se_obj:character_icon()
+                if ic and ic ~= "" then icon = ic end
+            end
+        end
+    end
+
+    msg = "%c[default]" .. msg
+    if xr_sound and xr_sound.set_sound_play then
+        xr_sound.set_sound_play(AC_ID, "pda_tips")
+    end
     db.actor:give_game_news(header, msg, icon, 0, 5000)
 end
 
@@ -712,9 +769,8 @@ local function get_target_position(target_id)
     if not target_id then return nil end
     local se_obj = alife_object(target_id)
     if not se_obj or not se_obj.position then return nil end
-    local ok, pos = pcall(function() return se_obj:position() end)
-    if ok and pos then return pos end
-    return nil
+    -- server objects expose position as a FIELD, not a method. see ref §770.
+    return se_obj.position
 end
 
 local function any_player_kill_near(tracker, pos, radius_m, window_s, monsters_only)
@@ -789,6 +845,19 @@ local function validate_bounty_kill(task_id)
         return true, "player_kill"
     end
 
+    -- kill IS recorded as player/companion but the credit query said no: the
+    -- only causes are the max_kill_distance / require_same_level gates or
+    -- companion_kills_count off. Abstain, never cancel: the player did engage,
+    -- only a gate withheld credit. Must return before the proximity fallbacks
+    -- below, which ignore the gates and would re-credit the same kill.
+    do
+        local kt = tonumber(target_id) or target_id
+        local kd = tracker._player_kills and tracker._player_kills[kt]
+        if kd and (kd.is_player_kill or kd.is_companion_kill) then
+            return false, "uncertain_kill_rejected"
+        end
+    end
+
     -- target_id may be a squad ID
     if tracker.was_squad_member_killed_by_player then
         local ok = tracker.was_squad_member_killed_by_player(target_id)
@@ -801,7 +870,7 @@ local function validate_bounty_kill(task_id)
         if target_pos and any_player_kill_near(tracker, target_pos, 100, 60, false) then
             return true, "target_dead_nearby_kill"
         end
-        if target_pos and actor_recent_shot_near(tracker, target_pos, 350, 5000) then
+        if target_pos and actor_recent_shot_near(tracker, target_pos, 350, 30000) then
             return true, "target_dead_actor_shot"
         end
     end
@@ -998,6 +1067,44 @@ local function validate_defense_kill(task_id)
     return false, "uncertain_no_enemy_kills"
 end
 
+-- clear-the-level hunt (mutants_in_map_target). The engine advances this task
+-- from stage 0 to stage 1 once the level's monster squads are gone, then stage 1
+-- just asks you to walk back to the giver. We reach this only at stage_complete
+-- (stage 1), so the engine has already confirmed the level was cleared; we just
+-- confirm the player/companions did the killing on that level (so squads that
+-- wandered off-level or despawned in offline sim don't gift completion), then
+-- complete without forcing the return trip. A live presence re-check is avoided
+-- on purpose: ambient wildlife can wander back onto the level after the stage
+-- advanced and would wrongly block a legitimately cleared task.
+local function validate_clear_map_kill(task_id, target_level, require_kill)
+    if not target_level or target_level == "" then
+        return false, "uncertain_no_level"
+    end
+
+    -- stage advance already proves the clear; with kill validation off, done.
+    if not require_kill then
+        return true, "level_cleared"
+    end
+
+    local tracker = get_kill_tracker()
+    if not tracker or not tracker._player_kills then
+        return false, "uncertain_no_tracker"
+    end
+    local reg = _registered_tasks[task_id]
+    local cutoff = get_task_registered_time(reg) - 600
+    for _, kd in pairs(tracker._player_kills) do
+        if kd.is_monster and (kd.is_player_kill or kd.is_companion_kill)
+           and kd.victim_level == target_level then
+            local kt = get_time_as_number(kd.time)
+            if kt and kt >= cutoff then
+                return true, "level_cleared"
+            end
+        end
+    end
+
+    return false, "uncertain_cleared_no_player_kill"
+end
+
 local function validate_mutant_hunt_kill(task_id)
     local tracker = get_kill_tracker()
     if not tracker or not tracker._player_kills then
@@ -1046,6 +1153,15 @@ local function validate_mutant_hunt_kill(task_id)
 
         if tracker.was_killed_by_player_or_companion and tracker.was_killed_by_player_or_companion(target_id_norm) then
             return true, "target_killed"
+        end
+
+        -- same gate-rejected abstain as the bounty validator: recorded
+        -- player/companion kill withheld by distance/level/companion gates.
+        do
+            local kd = tracker._player_kills[target_id_norm]
+            if kd and (kd.is_player_kill or kd.is_companion_kill) then
+                return false, "uncertain_kill_rejected"
+            end
         end
 
         if tracker.was_squad_member_killed_by_player then
@@ -1186,30 +1302,62 @@ local function get_whitelist_stage_override(list_str, task_id)
     return nil
 end
 
+-- Backwards compat: this task shipped as a dev default whitelist entry with a
+-- ":0" stage override before it had dedicated clear-the-level handling. The
+-- override made it complete at the accept stage. Updated players keep that entry
+-- cached in axr_options.ltx, so the new default cannot clear it. Drop that one
+-- exact token from the effective whitelist and let the normal path handle it.
+-- A plain "esc_2_12_stalker_fanat_task_3" (no override) is left alone - that is
+-- a deliberate force-complete choice, not the legacy artifact.
+local LEGACY_WHITELIST_IGNORE = "esc_2_12_stalker_fanat_task_3:0"
+
+local function strip_legacy_whitelist(list_str)
+    if not list_str or list_str == "" then return list_str end
+    if not string.find(list_str, "esc_2_12_stalker_fanat_task_3", 1, true) then
+        return list_str
+    end
+    local kept = {}
+    for item in string.gmatch(list_str, "[^,]+") do
+        local trimmed = item:match("^%s*(.-)%s*$")
+        if trimmed ~= LEGACY_WHITELIST_IGNORE then
+            kept[#kept + 1] = trimmed
+        end
+    end
+    return table.concat(kept, ",")
+end
+
+-- Resolve and cache a task's parsed task_manager.task_ini section. Returns nil
+-- for tasks that have no engine ini section, e.g. JSON tasks injected into
+-- task_info by frameworks like Weird Tasks Framework. A nil result means
+-- "foreign task, not ours to touch".
+local function get_task_def(task_id)
+    if not _task_cache[task_id] then
+        local parsed = utils_data.parse_ini_section_to_array(task_manager.task_ini, task_id)
+        if parsed then
+            _task_cache[task_id] = parsed
+            _task_cache_count = _task_cache_count + 1
+        end
+    end
+    return _task_cache[task_id]
+end
+
 local function should_autocomplete(task_id, task_info)
     if _recently_processed[task_id] then
         return false, "recently_processed"
     end
-    
+
     local stage = task_info.stage
     if not stage then return false, "no_stage" end
-    
-    -- Task giver death check - if task giver is dead, don't autocomplete
-    -- The task should fail naturally when giver dies
-    if task_info.task_giver_id then
-        local se_giver = alife_object(task_info.task_giver_id)
-        if not se_giver then
-            return false, "giver_not_found"
-        end
-        -- Check if giver is alive (for NPCs)
-        if se_giver.alive then
-            local success, is_alive = pcall(function() return se_giver:alive() end)
-            if success and not is_alive then
-                return false, "giver_dead"
-            end
-        end
-    end
-    
+
+    -- Foreign-task guard. Bail before any blacklist/whitelist/giver/register work
+    -- for tasks with no task_manager.task_ini section. Frameworks like Weird
+    -- Tasks Framework inject their own CGameTasks into task_info but define them
+    -- in JSON, so we have no functor or stage data for them and must never route
+    -- them into a validator or mutate their state. Keep this ahead of every
+    -- other check.
+    local tsk = get_task_def(task_id)
+    if not tsk then return false, "no_task_def" end
+
     if HARDCODED_BLACKLIST[task_id] then
         return false, "blacklisted"
     end
@@ -1221,21 +1369,10 @@ local function should_autocomplete(task_id, task_info)
     end
     
     -- Check if whitelisted (will bypass type check and kill validation, but NOT stage check)
-    local whitelist = (_cycle_config and _cycle_config.whitelist) or get_mcm_config(nil, "whitelist")
+    local whitelist = (_cycle_config and _cycle_config.whitelist) or strip_legacy_whitelist(get_mcm_config(nil, "whitelist"))
     local is_whitelisted = is_in_list(whitelist, task_id)
     local whitelist_stage_override = get_whitelist_stage_override(whitelist, task_id)
-    
-    if not _task_cache[task_id] then
-        local parsed = utils_data.parse_ini_section_to_array(task_manager.task_ini, task_id)
-        if parsed then
-            _task_cache[task_id] = parsed
-            _task_cache_count = _task_cache_count + 1
-        end
-    end
-    
-    local tsk = _task_cache[task_id]
-    if not tsk then return false, "no_task_def" end
-    
+
     if tsk.storyline and tsk.storyline == "true" then
         return false, "storyline"
     end
@@ -1248,6 +1385,22 @@ local function should_autocomplete(task_id, task_info)
 
         if not is_task_type_enabled(target_functor, task_id) then
             return false, "type_disabled"
+        end
+    end
+
+    -- Task giver death check. placed AFTER blacklist/storyline/type guards so
+    -- those tasks are never routed to giverdead_cancel. Returning false here
+    -- prevents autocomplete; do_autocompletion decides penalty-free cancel.
+    if task_info.task_giver_id then
+        local se_giver = alife_object(task_info.task_giver_id)
+        if not se_giver then
+            return false, "giver_not_found"
+        end
+        if se_giver.alive then
+            local success, is_alive = pcall(function() return se_giver:alive() end)
+            if success and not is_alive then
+                return false, "giver_dead"
+            end
         end
     end
 
@@ -1281,7 +1434,16 @@ local function should_autocomplete(task_id, task_info)
     if is_whitelisted then
         return true, "whitelisted"
     end
-    
+
+    -- clear-the-level tasks: at stage_complete the engine has already cleared the
+    -- level; confirm the player did the killing via the level-based validator
+    -- (vanilla mutant-hunt validation can't resolve a whole-level target).
+    if target_functor == "mutants_in_map_target" then
+        local require_kill = get_mcm_config(nil, "require_player_kill")
+        local valid, reason = validate_clear_map_kill(task_id, tsk.target, require_kill)
+        return valid, "mutant_" .. reason
+    end
+
     if get_mcm_config(nil, "require_player_kill") then
         local task_type = get_task_type(target_functor, task_id)
         if KILL_VALIDATION_TYPES[task_type] then
@@ -1385,6 +1547,167 @@ local function post_completion_cleanup(task_id, target_functor)
     end
 end
 
+-- ### LEVEL PROXIMITY GATE
+
+-- Adjacency transcribed from configs/ai_tweaks/simulation_objects.ltx
+-- (per-level target_maps), treated as undirected. ONE non-physical link is
+-- omitted: l02_garbage <-> l07_military. That sim-only shortcut would make
+-- Army Warehouses 2 hops from Cordon; on the in-game world map it is not.
+-- get_adj() symmetrizes the lists, so listing an edge on either side is enough.
+local LEVEL_NEIGHBORS = {
+    k00_marsh = { "l03_agroprom", "l01_escape", "l08_yantar" },
+    k01_darkscape = { "l01_escape", "l04_darkvalley" },
+    l01_escape = { "k00_marsh", "k01_darkscape", "l02_garbage", "y04_pole" },
+    l02_garbage = { "l06_rostok", "l03_agroprom", "l04_darkvalley", "l01_escape" },
+    l03_agroprom = { "l08_yantar", "l02_garbage", "k00_marsh", "l06_rostok", "l03u_agr_underground" },
+    l04_darkvalley = { "k01_darkscape", "l02_garbage", "l07_military", "k02_trucks_cemetery", "l04u_labx18", "y04_pole" },
+    l05_bar = { "l06_rostok", "l07_military", "l02_garbage", "k02_trucks_cemetery" },
+    l06_rostok = { "l07_military", "l08_yantar", "l02_garbage", "l03_agroprom" },
+    l07_military = { "l09_deadcity", "l10_red_forest", "l10_radar", "l04_darkvalley", "k02_trucks_cemetery" },
+    l08_yantar = { "l09_deadcity", "l06_rostok", "l03_agroprom", "k00_marsh", "l08u_brainlab" },
+    l09_deadcity = { "l08_yantar", "l10_limansk", "l07_military" },
+    l10_limansk = { "l10_red_forest", "l09_deadcity", "l11_hospital" },
+    l10_radar = { "l11_pripyat", "l10_red_forest", "l07_military", "l10u_bunker" },
+    l10_red_forest = { "l10_limansk", "l07_military", "l10_radar", "jupiter" },
+    l11_hospital = { "l10_limansk", "l12_stancia_2" },
+    l11_pripyat = { "l12_stancia", "l10_radar", "pripyat", "jupiter" },
+    l12_stancia = { "l11_pripyat", "l12_stancia_2", "zaton", "l12u_sarcofag" },
+    l12u_sarcofag = { "l12u_control_monolith", "l12_stancia" },
+    l12u_control_monolith = { "l12u_sarcofag", "l12_stancia_2" },
+    l12_stancia_2 = { "l12_stancia", "l13_generators", "l11_hospital", "l12u_control_monolith" },
+    l13_generators = { "l12_stancia_2" },
+    zaton = { "l12_stancia", "jupiter" },
+    jupiter = { "zaton", "jupiter_underground", "l10_red_forest", "l11_pripyat" },
+    pripyat = { "l11_pripyat", "jupiter_underground", "labx8" },
+    jupiter_underground = { "jupiter", "pripyat" },
+    k02_trucks_cemetery = { "l05_bar", "l04_darkvalley", "l07_military" },
+    y04_pole = { "l01_escape", "l04_darkvalley" },
+}
+
+-- north half of the map. anything not listed is south (rule: below Red Forest
+-- is south). Red Forest itself + Radar/Limansk and beyond are north; the CoP
+-- zones (Zaton/Jupiter/Pripyat-outskirts) are north; Army Warehouses and Dead
+-- City are south. Unknown/custom levels default to south.
+local NORTH_LEVELS = {
+    l10_red_forest = true, l10_radar = true, l10u_bunker = true,
+    l10_limansk = true, l11_hospital = true, l11_pripyat = true,
+    l12_stancia = true, l12_stancia_2 = true, l12u_sarcofag = true,
+    l12u_control_monolith = true, l13_generators = true,
+    zaton = true, jupiter = true, jupiter_underground = true,
+    pripyat = true, labx8 = true,
+}
+
+local _adj = nil
+local function get_adj()
+    if _adj then return _adj end
+    _adj = {}
+    local function link(a, b)
+        _adj[a] = _adj[a] or {}
+        _adj[b] = _adj[b] or {}
+        _adj[a][b] = true
+        _adj[b][a] = true
+    end
+    for lvl, neigh in pairs(LEVEL_NEIGHBORS) do
+        for _, n in ipairs(neigh) do
+            link(lvl, n)
+        end
+    end
+    return _adj
+end
+
+-- BFS hop count between two level names. 0 = same, nil = unknown/unreachable.
+local function level_distance(from_lvl, to_lvl)
+    if from_lvl == to_lvl then return 0 end
+    local adj = get_adj()
+    if not adj[from_lvl] or not adj[to_lvl] then return nil end
+    local visited = { [from_lvl] = true }
+    local frontier = { from_lvl }
+    local dist = 0
+    while #frontier > 0 and dist < 32 do
+        dist = dist + 1
+        local next_frontier = {}
+        for _, lvl in ipairs(frontier) do
+            for n in pairs(adj[lvl]) do
+                if not visited[n] then
+                    if n == to_lvl then return dist end
+                    visited[n] = true
+                    next_frontier[#next_frontier + 1] = n
+                end
+            end
+        end
+        frontier = next_frontier
+    end
+    return nil
+end
+
+local function level_half(lvl)
+    return NORTH_LEVELS[lvl] and "north" or "south"
+end
+
+local function se_level_name(se_obj)
+    if not se_obj or not se_obj.m_game_vertex_id then return nil end
+    local gg = game_graph()
+    if not gg then return nil end
+    local al = alife()
+    if not al then return nil end
+    local ok, name = pcall(function()
+        local v = gg:vertex(se_obj.m_game_vertex_id)
+        if not v then return nil end
+        return al:level_name(v:level_id())
+    end)
+    if ok then return name end
+    return nil
+end
+
+local function giver_level_name(giver_id)
+    if not giver_id then return nil end
+    local se = alife_object(giver_id)
+    if not se then return nil end
+    local lvl = se_level_name(se)
+    if lvl then return lvl end
+    -- squad giver: fall back to commander's level
+    if se.commander_id then
+        local ok, cid = pcall(function() return se:commander_id() end)
+        if ok and cid then
+            local cse = alife_object(cid)
+            if cse then return se_level_name(cse) end
+        end
+    end
+    return nil
+end
+
+-- gate the AUTOCOMPLETE path by player/giver level proximity. returns true if
+-- allowed. when it can't resolve a level it returns true (bias to not blocking,
+-- a false abstain just hands the task to Anomaly's natural completion). a false
+-- here makes the caller abstain (uncertain_*), never cancel. see DEV_STRATEGY.
+local function location_allows_autocomplete(task_info)
+    if not get_mcm_config(nil, "level_proximity_check") then return true end
+
+    local giver_id = task_info and task_info.task_giver_id
+    if not giver_id then return true end
+
+    local giver_lvl = giver_level_name(giver_id)
+    if not giver_lvl then return true end
+
+    local player_lvl = level.name()
+    if not player_lvl or player_lvl == "" then return true end
+
+    if player_lvl == giver_lvl then return true end
+
+    local mode = tonumber(get_mcm_config(nil, "level_proximity_mode")) or 1
+    if mode == 2 then
+        local n = tonumber(get_mcm_config(nil, "level_proximity_n")) or 2
+        local d = level_distance(giver_lvl, player_lvl)
+        if not d then return true end
+        return d <= n
+    elseif mode == 3 then
+        return level_half(giver_lvl) == level_half(player_lvl)
+    end
+
+    -- mode 1 (same level only) and levels differ
+    return false
+end
+
 -- ### MAIN LOOP
 
 local function get_cycle_config()
@@ -1393,13 +1716,14 @@ local function get_cycle_config()
             enable = get_mcm_config(nil, "enable"),
             enable_autocomplete = get_mcm_config(nil, "enable_autocomplete"),
             pda_check = get_mcm_config(nil, "pda_check"),
+            respect_fe_pda_flag = get_mcm_config(nil, "respect_fe_pda_flag"),
+            no_penalty_on_giver_death = get_mcm_config(nil, "no_penalty_on_giver_death"),
             debug = get_mcm_config(nil, "debug"),
             require_player_kill = get_mcm_config(nil, "require_player_kill"),
             cancel_if_stolen = get_mcm_config(nil, "cancel_if_stolen"),
             compensate_item_rewards = get_mcm_config(nil, "compensate_item_rewards"),
-            kill_requirement = get_mcm_config(nil, "kill_requirement") or 1,
             completion_delay = tonumber(get_mcm_config(nil, "completion_delay")) or 5,
-            whitelist = get_mcm_config(nil, "whitelist"),
+            whitelist = strip_legacy_whitelist(get_mcm_config(nil, "whitelist")),
             blacklist = get_mcm_config(nil, "blacklist"),
         }
     end
@@ -1429,9 +1753,13 @@ local function fire_completion(tm, task_id, giver_id, target_functor)
 end
 
 local function fire_cancellation(tm, task_id, giver_id, reason)
+    local giver_dead = reason == "giverdead_cancel"
     if not is_task_in_progress(task_id) then
         -- engine processed during delay; condlists already stripped
-        pcall(function() show_stolen_message(task_id, giver_id) end)
+        pcall(function()
+            if giver_dead then show_giver_dead_message(task_id, giver_id)
+            else show_stolen_message(task_id, giver_id) end
+        end)
         unregister_task(task_id)
         return false
     end
@@ -1458,11 +1786,31 @@ local function fire_cancellation(tm, task_id, giver_id, reason)
         end
 
         tm:set_task_cancelled(task_id)
-        show_stolen_message(task_id, giver_id)
+        if giver_dead then show_giver_dead_message(task_id, giver_id)
+        else show_stolen_message(task_id, giver_id) end
     end)
 
     unregister_task(task_id)
     return true
+end
+
+-- GAMMA task givers gate new-task offers on the drx_sl_task_giver_<giver_id>
+-- save_var (outstanding-task count). For most tasks that decrement, plus the
+-- stored-task reset, lives inside on_fail/on_complete. When we cancel by
+-- stripping on_fail (to drop the goodwill penalty) and the task has no separate
+-- on_cancel, that cleanup is lost and the giver leaks a phantom outstanding
+-- task, eventually refusing to hand out work. Run the cleanup directly here.
+-- Tasks that DO define on_cancel run it via the engine's cancelled branch, so
+-- skip them to avoid a double decrement. Both effects read
+-- task_info[task_id].task_giver_id, so the entry must still exist when called.
+local function run_drx_giver_cleanup(task_id, task_info)
+    if task_info and task_info.on_cancel then return end
+    if not (xr_effects and xr_effects.drx_sl_unregister_task_giver) then return end
+    local p = { task_id }
+    pcall(function()
+        xr_effects.drx_sl_unregister_task_giver(db.actor, db.actor, p)
+        xr_effects.drx_sl_reset_stored_task(db.actor, db.actor, p)
+    end)
 end
 
 local function drain_pending_queues(tm, now_ms)
@@ -1531,10 +1879,22 @@ local function do_autocompletion()
         if fair_autocomplete_utils and fair_autocomplete_utils.has_pda then
             has_pda = fair_autocomplete_utils.has_pda(db.actor)
         else
-            has_pda = db.actor:object("device_pda_1") or db.actor:object("device_pda_2")
-                   or db.actor:object("device_pda_3") or db.actor:object("device_pda_milspec")
+            -- detect PDA by slot (8), robust to renamed PDAs (Fatal Error etc.)
+            has_pda = (db.actor.item_in_slot and db.actor:item_in_slot(8)) and true or false
         end
         if not has_pda then return end
+
+        -- Fatal Error compat: honor the equipped PDA's autocomplete ini flag.
+        -- only acts when the key exists (FE installed); off by default.
+        if cfg.respect_fe_pda_flag and db.actor.item_in_slot then
+            local pda = db.actor:item_in_slot(8)
+            if pda and ini_sys and ini_sys.line_exist
+               and ini_sys:line_exist(pda:section(), "autocomplete")
+               and ini_sys:r_bool_ex(pda:section(), "autocomplete") ~= true
+            then
+                return
+            end
+        end
     end
 
     local tm = task_manager.get_task_manager()
@@ -1549,6 +1909,7 @@ local function do_autocompletion()
         if not tm.task_info[task_id] or not is_task_in_progress(task_id) then
             _registered_tasks[task_id] = nil
             _task_compensation_prices[task_id] = nil
+            _last_logged_stage[task_id] = nil
         end
     end
 
@@ -1556,9 +1917,52 @@ local function do_autocompletion()
         if task_id and task_info and not already_queued[task_id]
            and is_task_in_progress(task_id) then
             local stage = task_info.stage
+
+            -- stage-change tracker: print whenever an in-progress task moves
+            -- to a new stage. stage_complete is the stage FA fires at.
+            if cfg.debug and stage and _last_logged_stage[task_id] ~= stage then
+                _last_logged_stage[task_id] = stage
+                -- fill the cache first so stage_complete reads its real value
+                -- instead of nil on the task's first pass through this loop.
+                local tc = get_task_def(task_id)
+                local sc = tc and tc.stage_complete
+                local tf = tc and tc.target_functor
+                printf("[FA] Task %s: stage now %s (stage_complete=%s, functor=%s, type=%s, target=%s)",
+                    tostring(task_id), tostring(stage), tostring(sc),
+                    tostring(tf), tostring(get_task_type(tf, task_id)),
+                    tostring(tc and tc.target))
+            end
+
             if stage and stage >= 0 and stage <= 20 then
                 local ok, err = pcall(function()
                     local should, reason = should_autocomplete(task_id, task_info)
+
+                    -- task giver died: cancel without goodwill penalty (strip
+                    -- on_fail) instead of Anomaly's natural penalized fail.
+                    -- exempt keep-giver-alive task types (death = player fault).
+                    -- giver_not_found rides the same route: a nil server object
+                    -- for a once-valid giver id means the corpse got cleaned up
+                    -- by alife; without this the task sits in abstain limbo
+                    -- until the vanilla timeout.
+                    if (not should) and (reason == "giver_dead" or reason == "giver_not_found")
+                       and cfg.no_penalty_on_giver_death
+                    then
+                        local tc = get_task_def(task_id)
+                        local tf = tc and tc.target_functor
+                        local ttype = get_task_type(tf, task_id)
+                        if not GIVER_DEATH_PENALTY_TYPES[ttype] then
+                            reason = "giverdead_cancel"
+                        end
+                    end
+
+                    -- level-proximity gate: too far from the giver to autocomplete.
+                    -- abstain (uncertain_*), never cancel. whitelist bypasses.
+                    if should and reason ~= "whitelisted"
+                       and not location_allows_autocomplete(task_info)
+                    then
+                        should = false
+                        reason = "uncertain_too_far"
+                    end
 
                     -- alife-clean guard: weak-evidence autocompletes right
                     -- after sleep/fast-travel become stolen. see §8.
@@ -1598,6 +2002,10 @@ local function do_autocompletion()
                     elseif cfg.cancel_if_stolen and reason and reason:find("stolen_") then
                         _recently_processed[task_id] = os.time()
 
+                        -- run the giver cleanup that on_fail would have done
+                        -- before we strip it (entry still present here).
+                        run_drx_giver_cleanup(task_id, task_info)
+
                         -- strip condlists so engine update() during delay can't
                         -- pay rewards. safe to mutate: ref is already-parsed.
                         if task_info then
@@ -1613,6 +2021,29 @@ local function do_autocompletion()
                             }
                         else
                             fire_cancellation(tm, task_id, task_info.task_giver_id, reason)
+                        end
+                    elseif reason == "giverdead_cancel" then
+                        _recently_processed[task_id] = os.time()
+
+                        -- run the giver cleanup that on_fail would have done
+                        -- before we strip it (entry still present here).
+                        run_drx_giver_cleanup(task_id, task_info)
+
+                        -- strip condlists so the engine's natural fail during
+                        -- the delay can't apply the on_fail goodwill penalty.
+                        if task_info then
+                            task_info.on_complete = nil
+                            task_info.on_fail = nil
+                        end
+
+                        if delay_ms > 0 then
+                            _pending_cancellations[task_id] = {
+                                ready_at = now_ms + delay_ms,
+                                giver_id = task_info.task_giver_id,
+                                reason = "giverdead_cancel",
+                            }
+                        else
+                            fire_cancellation(tm, task_id, task_info.task_giver_id, "giverdead_cancel")
                         end
                     end
                 end)

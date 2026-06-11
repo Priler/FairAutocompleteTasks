@@ -5,12 +5,20 @@ local defaults = {
     ["enable"] = true,
     ["enable_autocomplete"] = true,
     ["pda_check"] = true,
+    -- Fatal Error compatibility: honor the equipped PDA's autocomplete ini flag
+    ["respect_fe_pda_flag"] = false,
     ["require_player_kill"] = true,
     ["companion_kills_count"] = true,
     ["count_assists"] = true,
     ["max_kill_distance"] = 0,  -- 0 = disabled, otherwise max meters
     ["require_same_level"] = true,
     ["cancel_if_stolen"] = true,
+    -- no goodwill loss when the task giver dies (Banjaji-style)
+    ["no_penalty_on_giver_death"] = true,
+    -- level proximity gate (limit autocomplete by player/giver level distance)
+    ["level_proximity_check"] = false,
+    ["level_proximity_mode"] = 1,  -- 1=same level, 2=within N neighbors, 3=same map half
+    ["level_proximity_n"] = 2,
     ["check_interval"] = 2.0,
     ["completion_delay"] = 5,
     
@@ -28,6 +36,7 @@ local defaults = {
     ["retrieve"] = false,
     ["measurements"] = false,
     ["scanner"] = false,
+    ["fetch"] = false,
     ["mutant_hunt"] = true,
     
     -- Task types - Special
@@ -38,13 +47,9 @@ local defaults = {
     ["research_hunt"] = false,
     ["recover_tracker"] = false,
     
-    -- Assault kill requirement (1=one, 2=half, 3=all)
-    ["kill_requirement"] = 1,
-    
     -- Other settings
-    ["whitelist"] = "esc_2_12_stalker_fanat_task_3:0",
+    ["whitelist"] = "",
     ["blacklist"] = "esc_2_12_stalker_wolf_task_3",
-    ["show_target_info"] = true,
     ["show_stolen_message"] = true,
     ["debug"] = false
 }
@@ -79,6 +84,8 @@ function on_mcm_load()
               hint = "fair_autocomplete_enable_autocomplete" },
             { id = "pda_check", type = "check", val = 1, def = true,
               hint = "fair_autocomplete_pda_check" },
+            { id = "respect_fe_pda_flag", type = "check", val = 1, def = false,
+              hint = "fair_autocomplete_respect_fe_pda_flag" },
             { id = "divider_1", type = "line" },
             
             -- Kill Validation
@@ -94,7 +101,24 @@ function on_mcm_load()
               hint = "fair_autocomplete_require_same_level" },
             { id = "cancel_if_stolen", type = "check", val = 1, def = true,
               hint = "fair_autocomplete_cancel_if_stolen" },
+            { id = "no_penalty_on_giver_death", type = "check", val = 1, def = true,
+              hint = "fair_autocomplete_no_penalty_on_giver_death" },
             { id = "divider_2", type = "line" },
+
+            -- Level Proximity Gate
+            { id = "level_proximity_check", type = "check", val = 1, def = false,
+              hint = "fair_autocomplete_level_proximity_check" },
+            { id = "level_proximity_mode", type = "list", val = 0, def = 1,
+              content = {
+                  { 1, "same" },
+                  { 2, "neighbor" },
+                  { 3, "half" }
+              },
+              hint = "fair_autocomplete_level_proximity_mode"
+            },
+            { id = "level_proximity_n", type = "track", val = 2, min = 1, max = 4, step = 1, def = 2,
+              hint = "fair_autocomplete_level_proximity_n" },
+            { id = "divider_prox", type = "line" },
             
             -- Task Types Header
             { id = "task_types_header", type = "desc", text = "ui_mcm_fair_autocomplete_task_types_header" },
@@ -120,6 +144,8 @@ function on_mcm_load()
               hint = "fair_autocomplete_measurements" },
             { id = "scanner", type = "check", val = 1, def = false,
               hint = "fair_autocomplete_scanner" },
+            { id = "fetch", type = "check", val = 1, def = false,
+              hint = "fair_autocomplete_fetch" },
             { id = "divider_3", type = "line" },
             
             -- Special Tasks Header
@@ -140,17 +166,6 @@ function on_mcm_load()
               hint = "fair_autocomplete_recover_tracker" },
             { id = "divider_4", type = "line" },
             
-            -- Kill Requirement
-            { id = "kill_requirement", type = "list", val = 0, def = 1,
-              content = {
-                  { 1, "fair_autocomplete_kill_req_one" },
-                  { 2, "fair_autocomplete_kill_req_half" },
-                  { 3, "fair_autocomplete_kill_req_all" }
-              },
-              hint = "fair_autocomplete_kill_requirement"
-            },
-            { id = "divider_5", type = "line" },
-            
             -- Rewards
             { id = "compensate_item_rewards", type = "check", val = 1, def = true,
               hint = "fair_autocomplete_compensate_item_rewards" },
@@ -159,8 +174,6 @@ function on_mcm_load()
             { id = "divider_6", type = "line" },
             
             -- UI Options
-            { id = "show_target_info", type = "check", val = 1, def = true,
-              hint = "fair_autocomplete_show_target_info" },
             { id = "show_stolen_message", type = "check", val = 1, def = true,
               hint = "fair_autocomplete_show_stolen_message" },
             { id = "divider_7", type = "line" },
@@ -170,7 +183,7 @@ function on_mcm_load()
               hint = "fair_autocomplete_check_interval" },
             { id = "completion_delay", type = "track", val = 2, min = 0, max = 15, step = 1, def = 5,
               hint = "fair_autocomplete_completion_delay" },
-            { id = "whitelist", type = "input", val = 0, def = "esc_2_12_stalker_fanat_task_3:0",
+            { id = "whitelist", type = "input", val = 0, def = "",
               hint = "fair_autocomplete_whitelist" },
             { id = "blacklist", type = "input", val = 0, def = "esc_2_12_stalker_wolf_task_3",
               hint = "fair_autocomplete_blacklist" },
