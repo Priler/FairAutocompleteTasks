@@ -107,12 +107,7 @@ end
 -- Stealth kills FIX. (gameplay_silent_kills.script)
 -- for some dumbass reason the game sets the killer to a weapon instead of an actor
 -- when the kill is stealth.
--- and the death/hit callbacks report the weapon object, not its owner.
--- A melee backstab also leaves no shot for the proximity-credit fallback, so
--- the kill lands as is_npc_kill and a clean assassination false-cancels as
--- stolen. Resolve a held item back to the stalker carrying it before
--- attribution. A stalker/monster has no inventory parent, so this is a no-op
--- for normal kills.
+-- This function checks "who possesses the gun". (c) Verdatim.
 local function resolve_to_owner(obj)
     if not obj then return obj end
     if obj:id() == AC_ID then return obj end
