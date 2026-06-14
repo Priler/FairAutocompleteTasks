@@ -89,6 +89,9 @@ _task_cache_count = 0  -- Track cache size
 local _registered_tasks = {}
 local _recently_processed = {}  -- Tasks recently completed/cancelled (prevent duplicates)
 local _last_logged_stage = {}   -- task_id to last stage we printed, for stage-change logging
+local _last_logged_verdict = {} -- task_id to last "should|reason" we printed, change-only debug
+local _last_logged_hunt = {}    -- task_id to last hunt-counts line we printed, change-only debug
+local _decided_legit = {}
 _task_compensation_prices = {}  -- Cache for item reward compensation (GLOBAL for task_callback)
 _tasks_being_autocompleted = {}
 
@@ -614,12 +617,19 @@ local function register_task(task_id)
         and existing.smart_terrain == reg_data.smart_terrain
     reg_data.registered_time = (is_same_task and existing.registered_time) or os.time()
 
+    -- re-take = fresh instance: drop any legit verdict from the old one so the
+    -- new target/smart is judged on its own evidence
+    if not is_same_task then
+        _decided_legit[task_id] = nil
+    end
+
     _registered_tasks[task_id] = reg_data
 end
 
 local function unregister_task(task_id)
     _registered_tasks[task_id] = nil
     _task_compensation_prices[task_id] = nil
+    _decided_legit[task_id] = nil
     
     -- evict from task cache to keep memory bounded
     if _task_cache[task_id] then
@@ -1255,11 +1265,17 @@ local function validate_mutant_hunt_kill(task_id)
     end
 
     if get_mcm_config(nil, "debug") then
-        printf("[FA-Hunt] task=%s smart_name=%s smart_pos=%s mutant_section=%s wildcard=%s player(at_loc=%s nearby=%s by_type=%s) npc(at_loc=%s nearby=%s by_type=%s)",
+        -- print only when the counts actually change, not every check cycle
+        local line = string.format(
+            "[FA-Hunt] task=%s smart_name=%s smart_pos=%s mutant_section=%s wildcard=%s player(at_loc=%s nearby=%s by_type=%s) npc(at_loc=%s nearby=%s by_type=%s)",
             tostring(task_id), tostring(smart_name), tostring(smart_position ~= nil),
             tostring(expected_base_type), tostring(is_wildcard_type),
             tostring(kills_at_location), tostring(kills_nearby), tostring(kills_by_type),
             tostring(npc_kills_at_location), tostring(npc_kills_nearby), tostring(npc_kills_by_type))
+        if _last_logged_hunt[task_id] ~= line then
+            _last_logged_hunt[task_id] = line
+            printf("%s", line)
+        end
     end
 
     if kills_at_location > 0 then return true, "kills_at_location" end
@@ -1910,6 +1926,9 @@ local function do_autocompletion()
             _registered_tasks[task_id] = nil
             _task_compensation_prices[task_id] = nil
             _last_logged_stage[task_id] = nil
+            _last_logged_verdict[task_id] = nil
+            _last_logged_hunt[task_id] = nil
+            _decided_legit[task_id] = nil
         end
     end
 
@@ -1973,9 +1992,22 @@ local function do_autocompletion()
                         reason = "stolen_alife_clean"
                     end
 
+                    -- latch the FINAL verdict, not the raw validator return. a
+                    -- task that survived the alife-clean guard with should==true
+                    -- is a confirmed legit completion: never cancel it later even
+                    -- if its kill evidence ages out
+                    if should then
+                        _decided_legit[task_id] = true
+                    end
+
                     if cfg.debug then
-                        printf("[FA] Task %s: should=%s, reason=%s",
-                            tostring(task_id), tostring(should), tostring(reason))
+                        -- print only when the verdict changes, not every check cycle
+                        local verdict = tostring(should) .. "|" .. tostring(reason)
+                        if _last_logged_verdict[task_id] ~= verdict then
+                            _last_logged_verdict[task_id] = verdict
+                            printf("[FA] Task %s: should=%s, reason=%s",
+                                tostring(task_id), tostring(should), tostring(reason))
+                        end
                     end
 
                     if should then
@@ -1999,7 +2031,8 @@ local function do_autocompletion()
                                 fire_completion(tm, task_id, task_info.task_giver_id, target_functor)
                             end
                         end
-                    elseif cfg.cancel_if_stolen and reason and reason:find("stolen_") then
+                    elseif cfg.cancel_if_stolen and reason and reason:find("stolen_")
+                           and not _decided_legit[task_id] then
                         _recently_processed[task_id] = os.time()
 
                         -- run the giver cleanup that on_fail would have done
@@ -2111,6 +2144,14 @@ function save_state(m_data)
         if v then ta[tid] = true end
     end
     m_data.fa_tasks_being_autocompleted = ta
+
+    -- persist the legit-verdict latch so a load-then-immediately-sleep can't
+    -- reopen a task FA already judged as a player completion
+    local dl = {}
+    for tid, v in pairs(_decided_legit) do
+        if v then dl[tid] = true end
+    end
+    m_data.fa_decided_legit = dl
 end
 
 function load_state(m_data)
@@ -2118,8 +2159,13 @@ function load_state(m_data)
     _task_cache_count = 0
     _registered_tasks = m_data.fa_registered_tasks or {}
     _recently_processed = {}
+    -- fresh debug-dedup state per session: each task logs once after load
+    _last_logged_stage = {}
+    _last_logged_verdict = {}
+    _last_logged_hunt = {}
     _task_compensation_prices = {}
     _tasks_being_autocompleted = {}
+    _decided_legit = {}
     _utils = nil
     _kill_tracker = nil
     _cycle_config = nil
@@ -2151,6 +2197,15 @@ function load_state(m_data)
     if m_data.fa_tasks_being_autocompleted then
         for tid, v in pairs(m_data.fa_tasks_being_autocompleted) do
             if v then _tasks_being_autocompleted[tid] = true end
+        end
+    end
+
+    -- restore the legit-verdict latch. normalize keys to numbers: m_data may
+    -- return task ids as strings after a save/load round-trip, and the cancel
+    -- guard indexes by the numeric task_id from tm.task_info
+    if m_data.fa_decided_legit then
+        for tid, v in pairs(m_data.fa_decided_legit) do
+            if v then _decided_legit[tonumber(tid) or tid] = true end
         end
     end
 

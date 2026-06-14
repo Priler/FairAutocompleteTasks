@@ -1,0 +1,29 @@
+<config>
+  <moduleName>Fair Autocomplete Tasks Enhanced</moduleName>
+  <moduleVersion>1.0</moduleVersion>
+
+  <installSteps>
+    <installStep name="Options">
+      <optionalFileGroups>
+        <group name="Optional files" type="SelectAny">
+          <plugins>
+
+            <plugin name="iTheon PDA Taskboard fix for GAMMA 0.9.4">
+              <description>You need this if you have iTheon PDA Taskboard and if you are playing GAMMA 0.9.4. It fixes a broken script (ui_pda_taskboard_tab.script) so your game will not crash. ONLY FOR GAMMA 0.9.4!!!</description>
+              <files>
+                <file source="Optional/gamedata/scripts/ui_pda_taskboard_tab.script"
+                      destination="gamedata/scripts/ui_pda_taskboard_tab.script" />
+              </files>
+            </plugin>
+
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+  </installSteps>
+
+  <!-- Always install the main mod files -->
+  <requiredInstallFiles>
+    <folder source="gamedata" destination="gamedata"/>
+  </requiredInstallFiles>
+</config>
