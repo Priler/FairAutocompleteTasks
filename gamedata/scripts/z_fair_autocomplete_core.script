@@ -897,6 +897,19 @@ local function validate_bounty_kill(task_id)
     return true, "assumed_player_no_record"
 end
 
+-- expl:
+-- assault_task_target_functor covers both human-faction clears and mutant-squad clears
+-- vanilla splits on the factions in status_functor_param
+-- For a mutant clear we must count monster kills (player credit + stolen_npc_cleared evidence) instead of discarding them the way the human path does
+local function assault_targets_monsters(task_id)
+    local ok, params = pcall(parse_list, task_manager.task_ini, task_id, "status_functor_params")
+    if not ok or type(params) ~= "table" then return false end
+    for i = 1, #params do
+        if is_squad_monster[params[i]] then return true end
+    end
+    return false
+end
+
 local function validate_assault_kill(task_id)
     local smart_name = nil
     local smart_position = nil
@@ -946,6 +959,8 @@ local function validate_assault_kill(task_id)
         return false, "uncertain_no_tracker"
     end
 
+    local want_monster = assault_targets_monsters(task_id)
+
     -- 10-min pre-task grace window (player may clear before accepting)
     local kill_eligibility_cutoff = task_registered_time - 600
 
@@ -956,7 +971,7 @@ local function validate_assault_kill(task_id)
 
     for _, kill_data in pairs(tracker._player_kills) do
         local kill_time = get_time_as_number(kill_data.time)
-        if kill_time >= kill_eligibility_cutoff and not kill_data.is_monster then
+        if kill_time >= kill_eligibility_cutoff and (kill_data.is_monster or false) == want_monster then
             local location_match = smart_name and kill_data.location == smart_name
             local nearby_match = false
             if smart_position and kill_data.position then
@@ -977,6 +992,18 @@ local function validate_assault_kill(task_id)
                 if location_match then npc_kills_at_location = npc_kills_at_location + 1 end
                 if nearby_match then npc_kills_nearby = npc_kills_nearby + 1 end
             end
+        end
+    end
+
+    if get_mcm_config(nil, "debug") then
+        local line = string.format(
+            "[FA-Assault] task=%s monster=%s player(loc=%s near=%s) npc(loc=%s near=%s)",
+            tostring(task_id), tostring(want_monster),
+            tostring(player_kills_at_location), tostring(player_kills_nearby),
+            tostring(npc_kills_at_location), tostring(npc_kills_nearby))
+        if _last_logged_hunt[task_id] ~= line then
+            _last_logged_hunt[task_id] = line
+            printf("%s", line)
         end
     end
 
@@ -1195,6 +1222,14 @@ local function validate_mutant_hunt_kill(task_id)
         if kill_data and not kill_data.is_player_kill and not kill_data.is_companion_kill then
             if tracker.was_hit_by_player_or_companion and tracker.was_hit_by_player_or_companion(target_id_norm) then
                 return true, "target_hit_then_died"
+            end
+            -- pack credit (duh): the tracked target is one member of a hunted pack
+            -- if the player killed other members of the same squad, the last
+            -- straggler dying to a random npc is not a theft (kill 2 of 3 dogs,
+            -- the third runs off and something else finishes it)
+            if kill_data.group_id and tracker.was_squad_member_killed_by_player
+               and tracker.was_squad_member_killed_by_player(kill_data.group_id) then
+                return true, "squad_sibling_killed"
             end
             return false, "stolen_someone_else_killed"
         end
@@ -1829,11 +1864,31 @@ local function run_drx_giver_cleanup(task_id, task_info)
     end)
 end
 
-local function drain_pending_queues(tm, now_ms)
+-- undo the queue-time condlist strip when a pending cancellation is abandoned (edge case)
+local function restore_task_condlists(tm, task_id)
+    local task_info = tm and tm.task_info and tm.task_info[task_id]
+    if not task_info then return end
+    local ini = task_manager.task_ini
+    if not (ini and ini:section_exist(task_id)) then return end
+    pcall(function()
+        if not task_info.on_complete and ini:line_exist(task_id, "on_complete") then
+            task_info.on_complete = ini:r_string_to_condlist(task_id, "on_complete")
+        end
+        if not task_info.on_fail and ini:line_exist(task_id, "on_fail") then
+            task_info.on_fail = ini:r_string_to_condlist(task_id, "on_fail")
+        end
+    end)
+end
+
+local function drain_pending_queues(tm, now_ms, cfg)
     local already_queued = {}
     for task_id, entry in pairs(_pending_completions) do
         if not is_task_in_progress(task_id) then
             -- task finished some other way; drop the queue entry
+            _pending_completions[task_id] = nil
+        elseif not cfg.enable_autocomplete then
+            -- option toggled off during the delay window or across a save
+            _tasks_being_autocompleted[task_id] = nil
             _pending_completions[task_id] = nil
         elseif entry.ready_at <= now_ms then
             already_queued[task_id] = true
@@ -1844,7 +1899,14 @@ local function drain_pending_queues(tm, now_ms)
         end
     end
     for task_id, entry in pairs(_pending_cancellations) do
+        local giver_dead = entry.reason == "giverdead_cancel"
+        local still_enabled = (giver_dead and cfg.no_penalty_on_giver_death)
+            or (not giver_dead and cfg.cancel_if_stolen)
         if not is_task_in_progress(task_id) then
+            _pending_cancellations[task_id] = nil
+        elseif not still_enabled then
+            -- option toggled off during the delay window or across a save
+            restore_task_condlists(tm, task_id)
             _pending_cancellations[task_id] = nil
         elseif entry.ready_at <= now_ms then
             already_queued[task_id] = true
@@ -1919,7 +1981,7 @@ local function do_autocompletion()
     local now_ms = time_global()
     local delay_ms = math.max(0, math.floor((cfg.completion_delay or 5) * 1000))
 
-    local already_queued = drain_pending_queues(tm, now_ms)
+    local already_queued = drain_pending_queues(tm, now_ms, cfg)
 
     for task_id, _ in pairs(_registered_tasks) do
         if not tm.task_info[task_id] or not is_task_in_progress(task_id) then

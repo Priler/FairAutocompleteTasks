@@ -320,10 +320,13 @@ function record_kill(victim, killer, is_monster)
             elseif companion_hit then
                 is_comp = true
             end
-        elseif _last_actor_shot_time and _last_actor_shot_time > 0 then
-            -- 10s/350m proximity credit
+        elseif (not killer_id or killer_id == victim_id)
+               and _last_actor_shot_time and _last_actor_shot_time > 0 then
+            -- 3s/350m proximity credit, ONLY for unattributed deaths (engine
+            -- passed no killer, or the victim itself for anomaly/environment
+            -- deaths)
             local since_shot = time_global() - _last_actor_shot_time
-            if since_shot >= 0 and since_shot <= 10000 then
+            if since_shot >= 0 and since_shot <= 3000 then
                 local shot_pos = _last_actor_shot_pos
                 local vpos_ok, vpos = pcall(function() return victim:position() end)
                 if shot_pos and vpos_ok and vpos then
