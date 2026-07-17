@@ -1,6 +1,5 @@
 <config>
   <moduleName>Fair Autocomplete Tasks Enhanced</moduleName>
-  <moduleVersion>1.0</moduleVersion>
 
   <installSteps>
     <installStep name="Options">

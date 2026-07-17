@@ -874,6 +874,25 @@ local function validate_bounty_kill(task_id)
         if ok then return true, "squad_member_kill" end
     end
 
+    local kt_norm = tonumber(target_id) or target_id
+    local kill_data = tracker._player_kills and tracker._player_kills[kt_norm]
+    local npc_kill_record = kill_data
+        and not kill_data.is_player_kill and not kill_data.is_companion_kill
+
+    if npc_kill_record then
+        -- assist override for bad attribution (anomaly tick, splash, etc.)
+        if tracker.was_hit_by_player_or_companion and tracker.was_hit_by_player_or_companion(kt_norm) then
+            return true, "target_hit_then_died"
+        end
+        -- a killer attributed to a living stalker/monster is hard theft
+        -- evidence: it must outrank the shot-proximity fallbacks below, or
+        -- any firefight the player has within 350m masks a real theft of this target
+        -- environment kills (barrel, anomaly) stay rescueable
+        if kill_data.killer_attributed and kill_data.killer_id ~= kt_norm then
+            return false, "stolen_someone_else_killed"
+        end
+    end
+
     local target_dead = tracker.is_target_dead and tracker.is_target_dead(target_id)
     if target_dead then
         local target_pos = get_target_position(target_id)
@@ -885,13 +904,9 @@ local function validate_bounty_kill(task_id)
         end
     end
 
-    local kt_norm = tonumber(target_id) or target_id
-    local kill_data = tracker._player_kills and tracker._player_kills[kt_norm]
-    if kill_data and not kill_data.is_player_kill and not kill_data.is_companion_kill then
-        -- assist override for bad attribution (anomaly tick, splash, etc.)
-        if tracker.was_hit_by_player_or_companion and tracker.was_hit_by_player_or_companion(kt_norm) then
-            return true, "target_hit_then_died"
-        end
+    -- unattributed npc-kill record (engine gave no killer) that no fallback
+    -- rescued: still counts as theft evidence, same as before
+    if npc_kill_record then
         return false, "stolen_someone_else_killed"
     end
     return true, "assumed_player_no_record"
@@ -1013,13 +1028,16 @@ local function validate_assault_kill(task_id)
         return true, "kills_at_location"
     end
 
-    if smart_position and actor_recent_shot_near(tracker, smart_position, 250, 30000) then
-        return true, "actor_shot_near_smart"
-    end
-
+    -- recorded npc kills at the smart are positive theft evidence and must
+    -- outrank the shot-proximity guess below, or any firefight the player
+    -- has within 250m of the smart masks a real npc clear bruh
     local npc_kills = math.max(npc_kills_at_location, npc_kills_nearby)
     if npc_kills > 0 then
         return false, "stolen_npc_cleared"
+    end
+
+    if smart_position and actor_recent_shot_near(tracker, smart_position, 250, 30000) then
+        return true, "actor_shot_near_smart"
     end
 
     return true, "assumed_smart_cleared"
@@ -1206,6 +1224,31 @@ local function validate_mutant_hunt_kill(task_id)
             if ok then return true, "squad_member_killed" end
         end
 
+        local kill_data = tracker._player_kills[target_id_norm]
+        local npc_kill_record = kill_data
+            and not kill_data.is_player_kill and not kill_data.is_companion_kill
+
+        if npc_kill_record then
+            if tracker.was_hit_by_player_or_companion and tracker.was_hit_by_player_or_companion(target_id_norm) then
+                return true, "target_hit_then_died"
+            end
+            -- pack credit (duh): the tracked target is one member of a hunted pack
+            -- if the player killed other members of the same squad, the last
+            -- straggler dying to a random npc is not a theft (kill 2 of 3 dogs,
+            -- the third runs off and something else finishes it)
+            if kill_data.group_id and tracker.was_squad_member_killed_by_player
+               and tracker.was_squad_member_killed_by_player(kill_data.group_id) then
+                return true, "squad_sibling_killed"
+            end
+            -- a killer attributed to a living stalker/monster is hard theft
+            -- evidence: it must outrank the shot-proximity fallbacks below,
+            -- or any firefight the player has within 350m masks a real theft of this target
+            -- environment kills stay rescueable
+            if kill_data.killer_attributed and kill_data.killer_id ~= target_id_norm then
+                return false, "stolen_someone_else_killed"
+            end
+        end
+
         local target_dead = tracker.is_target_dead and tracker.is_target_dead(target_id_norm)
         local target_pos = get_target_position(target_id_norm)
         if target_dead then
@@ -1218,19 +1261,8 @@ local function validate_mutant_hunt_kill(task_id)
             end
         end
 
-        local kill_data = tracker._player_kills[target_id_norm]
-        if kill_data and not kill_data.is_player_kill and not kill_data.is_companion_kill then
-            if tracker.was_hit_by_player_or_companion and tracker.was_hit_by_player_or_companion(target_id_norm) then
-                return true, "target_hit_then_died"
-            end
-            -- pack credit (duh): the tracked target is one member of a hunted pack
-            -- if the player killed other members of the same squad, the last
-            -- straggler dying to a random npc is not a theft (kill 2 of 3 dogs,
-            -- the third runs off and something else finishes it)
-            if kill_data.group_id and tracker.was_squad_member_killed_by_player
-               and tracker.was_squad_member_killed_by_player(kill_data.group_id) then
-                return true, "squad_sibling_killed"
-            end
+        -- unattributed npc-kill record that no fallback rescued: still theft
+        if npc_kill_record then
             return false, "stolen_someone_else_killed"
         end
         return true, "assumed_player_no_record"
@@ -1317,12 +1349,15 @@ local function validate_mutant_hunt_kill(task_id)
     if kills_nearby > 0 then return true, "kills_nearby" end
     if kills_by_type > 0 then return true, "kills_by_type" end
 
-    if smart_position and actor_recent_shot_near(tracker, smart_position, 250, 60000) then
-        return true, "actor_shot_near_smart"
-    end
-
+    -- recorded npc kills are positive theft evidence and must outrank the
+    -- shot-proximity guess below, or any firefight the player has within
+    -- 250m of the smart masks a real npc clear BRUH
     if npc_kills_at_location > 0 or npc_kills_nearby > 0 or npc_kills_by_type > 0 then
         return false, "stolen_npc_cleared"
+    end
+
+    if smart_position and actor_recent_shot_near(tracker, smart_position, 250, 60000) then
+        return true, "actor_shot_near_smart"
     end
 
     return true, "assumed_smart_cleared"
@@ -1939,6 +1974,28 @@ local function is_recent_time_skip()
         and (time_global() - _last_time_skip_global) < TIME_SKIP_GRACE_MS
 end
 
+-- verdicts allowed to latch a permanent legit decision
+local STRONG_LEGIT_REASONS = {
+    "player_kill", "target_killed",
+    "squad_member_kill", "squad_member_killed", "squad_sibling_killed",
+    "target_hit_then_died", "target_dead_nearby_kill",
+    "kills_at_location", "kills_nearby", "kills_by_type",
+    "enemy_kills_at_location", "level_cleared",
+}
+
+-- reasons arrive with a task-type prefix ("bounty_player_kill"), so match
+-- the bare reason as a whole suffix component
+local function is_strong_legit_reason(reason)
+    if not reason then return false end
+    for i = 1, #STRONG_LEGIT_REASONS do
+        local s = STRONG_LEGIT_REASONS[i]
+        if reason == s or reason:sub(-(#s + 1)) == "_" .. s then
+            return true
+        end
+    end
+    return false
+end
+
 local function do_autocompletion()
     if not _mod_ready then return end
 
@@ -2056,9 +2113,10 @@ local function do_autocompletion()
 
                     -- latch the FINAL verdict, not the raw validator return. a
                     -- task that survived the alife-clean guard with should==true
-                    -- is a confirmed legit completion: never cancel it later even
-                    -- if its kill evidence ages out
-                    if should then
+                    -- AND strong kill evidence is a confirmed legit completion:
+                    -- never cancel it later even if its kill evidence ages out
+                    -- weak verdicts (shot-proximity, assumed_*) do not latch
+                    if should and is_strong_legit_reason(reason) then
                         _decided_legit[task_id] = true
                     end
 

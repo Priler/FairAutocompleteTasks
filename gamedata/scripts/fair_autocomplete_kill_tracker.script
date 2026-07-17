@@ -305,10 +305,18 @@ function record_kill(victim, killer, is_monster)
 
     local victim_id = victim:id()
     local killer_id = killer and killer:id() or nil
-    
+
     local is_player = is_actor(killer)
     local is_comp = is_companion(killer)
-    
+
+    -- classify the killer NOW while the game object is live: only a living
+    -- stalker or monster killer counts as hard theft evidence downstream:
+    -- barrels, anomaly zones, unresolved weapons etc are environment kills and stay rescueable by the validator fallbacks
+    local killer_attributed = false
+    if killer and not is_player and not is_comp and killer_id ~= victim_id then
+        killer_attributed = IsStalker(killer) or IsMonster(killer) or false
+    end
+
     -- Check if player/companion hit first (assist credit)
     local has_assist = was_hit_by_player_or_companion(victim_id)
     
@@ -408,6 +416,7 @@ function record_kill(victim, killer, is_monster)
     
     _player_kills[victim_id] = {
         killer_id = killer_id,
+        killer_attributed = killer_attributed,
         time = os.time(),
         section = victim:section(),
         location = smart_terrain,
